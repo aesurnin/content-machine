@@ -371,55 +371,53 @@ export function WorkflowEditor() {
     return () => { cancelled = true }
   }, [videoId, currentWorkflowId, updateVideoState])
 
-  /** Sync from backend cache (source of truth) after load. Fixes stale cache when user reloaded mid-job. */
+  const syncCacheState = useCallback(async (vid: string) => {
+    const pid = projectIdRef.current
+    if (!pid || !vid) return
+    const wf = stateByVideoRef.current[vid]?.workflow
+    if (!wf?.modules?.length) return
+    try {
+      const r = await fetch(`/api/projects/${pid}/videos/${vid}/workflow-cache/state`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ workflow: wf }),
+      })
+      if (!r.ok) return
+      const data = await r.json() as {
+        stepOutputUrls?: Record<number, string>
+        stepOutputContentTypes?: Record<number, string>
+        stepRemotionSceneUrls?: Record<number, string>
+        stepStatuses?: Record<number, string>
+        slotsByModuleId?: Record<string, Array<{ key: string; kind: string; label?: string }>>
+      } | null
+      if (!data) return
+      if (data.slotsByModuleId && Object.keys(data.slotsByModuleId).length > 0) {
+        setPreviewSlotsByModuleId((prev) => ({ ...prev, ...data.slotsByModuleId }))
+      }
+      setStateByVideo((prev) => {
+        const s = prev[vid] ?? defaultVideoState()
+        const next = { ...s }
+        next.stepOutputUrls = data.stepOutputUrls ?? {}
+        next.stepOutputContentTypes = data.stepOutputContentTypes ?? {}
+        next.stepRemotionSceneUrls = data.stepRemotionSceneUrls ?? {}
+        if (data.stepStatuses && Object.keys(data.stepStatuses).length > 0) {
+          const merged: Record<number, StepStatus> = { ...s.stepStatuses }
+          for (const [k, v] of Object.entries(data.stepStatuses)) {
+            if (v === "done") merged[Number(k)] = "done"
+          }
+          next.stepStatuses = merged
+        }
+        return { ...prev, [vid]: next }
+      })
+    } catch {}
+  }, [])
+
+  /** Sync from backend cache (source of truth) after load. */
   useEffect(() => {
     if (!projectId || !videoId || !workflow?.modules?.length) return
-    let cancelled = false
-    fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/state`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ workflow }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: { stepOutputUrls?: Record<number, string>; stepOutputContentTypes?: Record<number, string>; stepRemotionSceneUrls?: Record<number, string>; stepStatuses?: Record<number, string>; slotsByModuleId?: Record<string, Array<{ key: string; kind: string; label?: string }>> } | null) => {
-        if (cancelled || !data) return
-        if (data.slotsByModuleId && Object.keys(data.slotsByModuleId).length > 0) {
-          setPreviewSlotsByModuleId((prev) => ({ ...prev, ...data.slotsByModuleId }))
-        }
-        setStateByVideo((prev) => {
-          const s = prev[videoId] ?? defaultVideoState()
-          let changed = false
-          const next = { ...s }
-          if (data.stepOutputUrls && Object.keys(data.stepOutputUrls).length > 0) {
-            next.stepOutputUrls = { ...(s.stepOutputUrls ?? {}), ...data.stepOutputUrls }
-            changed = true
-          }
-          if (data.stepOutputContentTypes && Object.keys(data.stepOutputContentTypes).length > 0) {
-            next.stepOutputContentTypes = { ...(s.stepOutputContentTypes ?? {}), ...data.stepOutputContentTypes }
-            changed = true
-          }
-          if (data.stepRemotionSceneUrls) {
-            // Replace, don't merge — backend only returns Remotion URLs for video.render.remotion modules.
-            // Merging would keep stale URLs for steps that are now LLM Agent etc.
-            next.stepRemotionSceneUrls = data.stepRemotionSceneUrls
-            changed = true
-          }
-          if (data.stepStatuses && Object.keys(data.stepStatuses).length > 0) {
-            const merged: Record<number, StepStatus> = { ...s.stepStatuses }
-            for (const [k, v] of Object.entries(data.stepStatuses)) {
-              if (v === "done") merged[Number(k)] = "done"
-            }
-            next.stepStatuses = merged
-            changed = true
-          }
-          if (!changed) return prev
-          return { ...prev, [videoId]: next }
-        })
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [projectId, videoId, currentWorkflowId])
+    syncCacheState(videoId)
+  }, [projectId, videoId, currentWorkflowId, syncCacheState])
 
   const saveCacheRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -556,11 +554,14 @@ export function WorkflowEditor() {
         })
         if (job.status === "completed") addLog("Workflow step completed", "info", jobVideoId)
         else if (job.status === "failed") addLog(`Failed: ${job.error}`, "error", jobVideoId)
+        if ((job.status === "completed" || job.status === "failed") && jobVideoId) {
+          syncCacheState(jobVideoId)
+        }
       } catch {
         // ignore
       }
     },
-    [addLog, fetchLogsForVideo, setPreviewSlotsByModuleId]
+    [addLog, fetchLogsForVideo, setPreviewSlotsByModuleId, syncCacheState]
   )
 
   useEffect(() => {
@@ -1156,11 +1157,12 @@ export function WorkflowEditor() {
     moduleTypes.find((m) => m.type === type)?.label ?? type
 
   const handlePreview = (url: string, label: string, contentType?: string, moduleType?: string, remotionSceneUrl?: string) => {
-    const base = { url, label, contentType: contentType ?? "video/mp4" }
-    // Only use Remotion scene URL for video.render.remotion — other modules (LLM Agent, etc.) don't have scene.json
+    const bustCache = (u: string) => u.startsWith("/") ? `${u}${u.includes("?") ? "&" : "?"}_t=${Date.now()}` : u
+    const freshUrl = bustCache(url)
+    const base = { url: freshUrl, label, contentType: contentType ?? "video/mp4" }
     const isRemotion = moduleType === "video.render.remotion"
     const sceneUrl = isRemotion ? (remotionSceneUrl ?? (url.includes("/file?") ? url.replace(/path=[^&]+/, "path=scene.json") : undefined)) : undefined
-    setPreviewVideo(sceneUrl ? { ...base, remotionSceneUrl: sceneUrl } : base)
+    setPreviewVideo(sceneUrl ? { ...base, remotionSceneUrl: bustCache(sceneUrl) } : base)
   }
 
   const handleRemotionScenePreview = (idx: number) => {
