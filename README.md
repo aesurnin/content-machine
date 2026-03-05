@@ -26,9 +26,11 @@ Platform for video analysis and social media content creation.
    - Start Docker (Postgres, Redis, screencast-worker)
    - Wait for Redis to be ready
    - Apply the database schema
-   - Start backend (port 3000) and frontend (port 5173)
+   - Start backend (port 3001 by default) and frontend (port 5173)
 
 3. Open http://localhost:5173 (or 5174)
+
+**Port conflicts?** This project uses non-standard ports by default (Postgres 5433, Redis 6380, Backend 3001) to avoid conflicts with other projects. Override in `.env` with `POSTGRES_PORT`, `REDIS_PORT`, `PORT` if needed.
 
 ## Screencast Recording (Add Video by URL)
 
@@ -43,7 +45,7 @@ The screencast worker runs automatically when you use `npm run dev`. It reads R2
 - **`docker`**: Uses Xvfb + PulseAudio + FFmpeg x11grab. Runs in Docker, suitable for server deployment.
 - **`puppeteer-stream`** (default): Uses Chrome's internal streaming API. Works on macOS/Windows without Docker. The browser opens off-screen (`--window-position=9999,9999`) so it does not steal focus or expand to fullscreen. On Linux, use `Xvfb :99 -screen 0 1920x1080x24 &` and `DISPLAY=:99` for a fully invisible browser (like Docker).
 
-For **live preview** (the image you see while recording is what the worker is actually capturing), set `BACKEND_URL` and `SCREENCAST_PREVIEW_SECRET` in `.env`. Use the same secret value so the worker can send frames to the backend; e.g. `BACKEND_URL=http://host.docker.internal:3000` and any random string for `SCREENCAST_PREVIEW_SECRET`.
+For **live preview** (the image you see while recording is what the worker is actually capturing), set `BACKEND_URL` and `SCREENCAST_PREVIEW_SECRET` in `.env`. Use the same secret value so the worker can send frames to the backend; e.g. `BACKEND_URL=http://host.docker.internal:3001` and any random string for `SCREENCAST_PREVIEW_SECRET`.
 
 ## Contributing
 

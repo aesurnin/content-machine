@@ -22,7 +22,8 @@ SCHEMA (use ONLY these fields — others are ignored):
   "slots": [
     { "key": "main_video", "kind": "video", "label": "Main Video" },
     { "key": "voice_input", "kind": "file", "label": "Voice Input" },
-    { "key": "background_music", "kind": "file", "label": "Background Music" }
+    { "key": "background_music", "kind": "file", "label": "Background Music" },
+    { "key": "voice_captions", "kind": "text", "label": "Voice Captions JSON" }
   ],
   "scene": {
     "width": 1920,
@@ -38,7 +39,8 @@ SCHEMA (use ONLY these fields — others are ignored):
       { "type": "video", "src": "{{slot_key}}", "from": 0, "durationInFrames": 90, "layout": "cover", "volume": 1 },
       { "type": "text", "text": "Literal text or {{slot_key}}", "from": 0, "durationInFrames": 90, "position": "bottom", "fontSize": 48, "color": "#ffffff" },
       { "type": "audio", "src": "{{voice_input}}", "from": 0, "durationInFrames": 180, "volume": 1 },
-      { "type": "audio", "src": "{{background_music}}", "from": 0, "durationInFrames": 180, "volume": 0.5 }
+      { "type": "audio", "src": "{{background_music}}", "from": 0, "durationInFrames": 180, "volume": 0.5 },
+      { "type": "subtitle", "from": 0, "durationInFrames": 180, "captions": "{{voice_captions}}", "position": "bottom", "combineTokensWithinMs": 1200, "fontFamily": "reels", "fontSize": 36 }
     ]
   }
 }
@@ -66,6 +68,21 @@ TEXT CLIP (type "text"):
 - fontSize: number (optional)
 - color: CSS color string (optional)
 
+SUBTITLE CLIP (type "subtitle"):
+- from: number (start frame), durationInFrames: number (total duration of subtitle track)
+- captions: "{{voice_captions}}" — placeholder for word-level captions JSON. Add slot { "key": "voice_captions", "kind": "text", "label": "Voice Captions JSON" }. Connect the "Transcribe Audio (ElevenLabs)" module output to this slot. Format: [{ text: " word", startMs, endMs, timestampMs, confidence }]
+- combineTokensWithinMs: number — milliseconds window to group words into one display page (optional, default 1200). Lower = more word-by-word, higher = more words per page.
+- position: "bottom" | "top" | "center" | "bottom-left" | "bottom-right" | "top-left" | "top-right" (optional, default "bottom")
+- positionOffset: number — px from edge (optional, default 40)
+- x: number — horizontal offset as % from center; negative = left, positive = right (0 = center). When set with y, overrides position.
+- y: number — vertical offset as % from center; negative = up, positive = down (0 = center). When set with x, overrides position.
+- fontSize: number (optional, default 36)
+- color: CSS hex color for inactive words (optional, default "#ffffff")
+- activeColor: CSS hex color for currently spoken word (optional, default "#FFD700")
+- bgColor: CSS hex color for background box (optional, default "#000000")
+- bgOpacity: number 0–1 for background box opacity (optional, default 0.75)
+- fontFamily: "reels" | "clean" | "bold" or CSS font-family string (optional, default "reels") — reels = Bebas Neue (bold), clean = Montserrat, bold = Oswald
+
 AUDIO CLIP (type "audio"):
 - src: "{{slot_key}}", from, durationInFrames
 - volume: number (0 = mute, 1 = normal, >1 = amplify, e.g. 1.5 or 2, optional, default 1)
@@ -74,6 +91,10 @@ MULTIPLE AUDIO:
 - You MAY add multiple audio clips (e.g. voice_input for narration, background_music for music).
 - Each audio clip needs its own slot in "slots" with kind "file".
 - Example slots: main_video (video), voice_input (file), background_music (file).
+
+CAPTIONS SLOT:
+- When scenario has subtitles, add slot { "key": "voice_captions", "kind": "text", "label": "Voice Captions JSON" } and use "captions": "{{voice_captions}}" in the subtitle clip.
+- The connected file is a JSON array of word-level Caption objects. Use the "Transcribe Audio (ElevenLabs)" module: connect audio (from TTS or other source) to it, then connect its captions output to voice_captions.
 
 RULES:
 - "slots" defines variables the user connects. Each slot: key, kind (video|text|file), label.
@@ -230,7 +251,7 @@ export async function generateScenarioPreview(
   }
 
   const userMessage = params.contextText
-    ? `Context:\n${params.contextText}\n\nTask: ${prompt}`
+    ? `Current scenario (modify according to the task below):\n${params.contextText}\n\nTask: ${prompt}\n\nReturn the complete updated JSON scenario.`
     : prompt;
 
   const result = await callOpenRouter({
@@ -399,6 +420,32 @@ export class LlmScenarioGeneratorModule implements WorkflowModule {
     }
 
     onProgress?.(70, 'Substituting variables');
+
+    // Resolve subtitle captions from file when captions is "{{slot_key}}" and slot is connected
+    const sceneClips = (scene.clips ?? []) as Array<Record<string, unknown>>;
+    for (let i = 0; i < sceneClips.length; i++) {
+      const clip = sceneClips[i];
+      if (clip?.type === 'subtitle' && typeof clip.captions === 'string') {
+        const match = (clip.captions as string).match(/^\{\{([A-Za-z0-9_]+)\}\}$/);
+        if (match) {
+          const slotKey = match[1];
+          const filePath = context.inputPaths?.[slotKey] ?? context.variables?.[slotKey];
+          if (filePath && typeof filePath === 'string') {
+            try {
+              const content = await fs.readFile(path.resolve(filePath), 'utf8');
+              const parsed = JSON.parse(content) as unknown;
+              const captions = Array.isArray(parsed)
+                ? parsed
+                : (parsed as Record<string, unknown>)?.captions ?? [];
+              sceneClips[i] = { ...clip, captions };
+              onLog?.(`[ScenarioGenerator] Loaded ${Array.isArray(captions) ? captions.length : 0} caption words from ${slotKey}`);
+            } catch (e) {
+              onLog?.(`[ScenarioGenerator] WARNING: Could not load captions file from ${slotKey}: ${e}`);
+            }
+          }
+        }
+      }
+    }
 
     // Convert local paths to API URLs so output.json has portable links (not server-specific paths)
     const cacheBase = path.resolve(process.env.WORKFLOW_CACHE_BASE || path.join(process.cwd(), 'workflow-cache'));

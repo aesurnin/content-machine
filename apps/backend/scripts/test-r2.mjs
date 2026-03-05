@@ -4,7 +4,9 @@
  * Requires: npm install dotenv (or run with node --env-file=.env)
  */
 import 'dotenv/config';
+import https from 'https';
 import { S3Client, ListBucketsCommand, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 const BUCKET = process.env.R2_BUCKET_NAME;
 const ENDPOINT = process.env.R2_ENDPOINT;
@@ -23,23 +25,37 @@ if (!BUCKET || !ENDPOINT || !ACCESS_KEY || !SECRET_KEY) {
   process.exit(1);
 }
 
+const httpsAgent = new https.Agent({
+  minVersion: 'TLSv1.2',
+  maxVersion: 'TLSv1.3',
+  rejectUnauthorized: true,
+  keepAlive: false,
+});
+
 const client = new S3Client({
   region: 'auto',
   endpoint: ENDPOINT,
   credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY },
   forcePathStyle: true,
+  requestHandler: new NodeHttpHandler({ httpsAgent }),
+  requestChecksumCalculation: 'WHEN_REQUIRED',
+  responseChecksumValidation: 'WHEN_REQUIRED',
 });
 
 async function test() {
   try {
-    console.log('1. Listing buckets...');
-    const buckets = await client.send(new ListBucketsCommand({}));
-    console.log('   OK. Buckets:', buckets.Buckets?.map(b => b.Name).join(', ') || '(none)');
-    
-    if (!buckets.Buckets?.some(b => b.Name === BUCKET)) {
-      console.error(`   ERROR: Bucket "${BUCKET}" not found in account.`);
-      console.error('   Available:', buckets.Buckets?.map(b => b.Name).join(', '));
-      process.exit(1);
+    console.log('1. Listing buckets (may fail for bucket-scoped tokens)...');
+    try {
+      const buckets = await client.send(new ListBucketsCommand({}));
+      console.log('   OK. Buckets:', buckets.Buckets?.map(b => b.Name).join(', ') || '(none)');
+      if (!buckets.Buckets?.some(b => b.Name === BUCKET)) {
+        console.error(`   ERROR: Bucket "${BUCKET}" not found in account.`);
+        process.exit(1);
+      }
+    } catch (e) {
+      if (e.name === 'AccessDenied') {
+        console.log('   Skipped (bucket-scoped token). Proceeding to upload test...');
+      } else throw e;
     }
 
     console.log('2. Uploading test object...');

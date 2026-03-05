@@ -1,3 +1,5 @@
+# Ports are configurable via .env to avoid conflicts with other projects:
+# POSTGRES_PORT (default 5433), REDIS_PORT (default 6380)
 services:
   postgres:
     image: postgres:15-alpine
@@ -7,7 +9,7 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: videoplatform
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -15,7 +17,7 @@ services:
     image: redis:7-alpine
     restart: always
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6380}:6379"
 
   screencast-worker:
     build:
@@ -32,7 +34,7 @@ services:
       - DISPLAY=:99
       - PULSE_SINK=recording
       - SCREENCAST_MAX_DURATION=${SCREENCAST_MAX_DURATION:-600}
-      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:3000}
+      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:3001}
       - SCREENCAST_PREVIEW_SECRET=${SCREENCAST_PREVIEW_SECRET}
       - NODE_OPTIONS=--tls-min-v1.2
     cap_add:

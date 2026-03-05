@@ -72,6 +72,10 @@ type ModuleMeta = {
     min?: number
     max?: number
     options?: { value: string; label: string }[]
+    provider?: string
+    providerOneOf?: string[]
+    optionsByProvider?: Record<string, { value: string; label: string }[]>
+    defaultByProvider?: Record<string, unknown>
   }>
 }
 
@@ -1092,7 +1096,7 @@ export function WorkflowEditor() {
     }
   }
 
-  const generateScenarioForModal = useCallback(async (prompt: string, params: Record<string, unknown>): Promise<{ json: Record<string, unknown>; slots: Array<{ key: string; kind: string; label?: string }> } | { error: string }> => {
+  const generateScenarioForModal = useCallback(async (prompt: string, currentSceneJson: string, params: Record<string, unknown>): Promise<{ json: Record<string, unknown>; slots: Array<{ key: string; kind: string; label?: string }> } | { error: string }> => {
     if (!projectId || !videoId) return { error: "No project or video" }
     addLog("Generating scenario...", "info", videoId)
     try {
@@ -1100,7 +1104,11 @@ export function WorkflowEditor() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ prompt, params }),
+        body: JSON.stringify({
+          prompt,
+          contextText: currentSceneJson.trim() ? currentSceneJson : undefined,
+          params,
+        }),
       })
       const data = await r.json().catch(async () => ({ error: await r.text().catch(() => String(r.status)) }))
       if (r.ok && data.json && data.slots) {
@@ -1538,19 +1546,38 @@ export function WorkflowEditor() {
         const idx = scenarioEditorOpen
         const mod = workflow.modules[idx]
         const params = mod?.params ?? {}
+        const slotUrls: Record<string, string> = {}
+        const variableUrls: Record<string, string> = {}
+        variableUrls.source = selectedVideo?.streamUrl ?? selectedVideo?.playUrl ?? (projectId && videoId ? `/api/projects/${projectId}/videos/${videoId}/stream` : "")
+        for (let i = 0; i < idx && i < workflow.modules.length; i++) {
+          const m = workflow.modules[i]
+          const url = stepOutputUrls[i]
+          if (url && m?.outputs) {
+            for (const varName of Object.values(m.outputs)) {
+              if (varName) variableUrls[varName] = url
+            }
+          }
+        }
+        let slotKeys = parseSlotsFromJson(String(params.sceneJson ?? "")).map((s) => s.key)
+        if (slotKeys.length === 0 && mod?.inputs) slotKeys = Object.keys(mod.inputs)
+        for (const slotKey of slotKeys) {
+          const varName = mod?.inputs?.[slotKey]
+          if (varName && variableUrls[varName]) slotUrls[slotKey] = variableUrls[varName]
+        }
         return (
           <ScenarioEditorModal
             isOpen={true}
             onClose={() => setScenarioEditorOpen(null)}
             initialPrompt={String(params.prompt ?? "")}
             initialSceneJson={String(params.sceneJson ?? "")}
+            slotUrls={slotUrls}
             onSave={(prompt, sceneJson, slots) => {
               updateModuleParams(idx, { ...params, prompt, sceneJson })
               if (mod?.id && slots.length > 0) {
                 setPreviewSlotsByModuleId((prev) => ({ ...prev, [mod.id]: slots }))
               }
             }}
-            onGenerate={(prompt) => generateScenarioForModal(prompt, params)}
+            onGenerate={(prompt, currentSceneJson) => generateScenarioForModal(prompt, currentSceneJson, params)}
           />
         )
       })()}
@@ -1649,6 +1676,32 @@ function ModuleBlock({
   const meta = moduleTypes.find((m) => m.type === module.type)
   const params = module.params ?? {}
   const paramsSchema = meta?.paramsSchema ?? []
+  const currentProvider = String(params.provider ?? "veed-fabric")
+
+  const handleParamsChange = useCallback((newParams: Record<string, unknown>) => {
+    if (module.type === "video.fal.veed-fabric") {
+      const prevProvider = String(params.provider ?? "veed-fabric")
+      const nextProvider = String(newParams.provider ?? prevProvider)
+      if (nextProvider !== prevProvider) {
+        const apiKeySchema = meta?.paramsSchema?.find((p) => p.key === "apiKeyEnvVar")
+        const resSchema = meta?.paramsSchema?.find((p) => p.key === "resolution")
+        const prevDefaultApiKey = apiKeySchema?.defaultByProvider?.[prevProvider] ?? apiKeySchema?.default
+        const nextDefaultApiKey = apiKeySchema?.defaultByProvider?.[nextProvider] ?? apiKeySchema?.default
+        const currentApiKey = String(params.apiKeyEnvVar ?? prevDefaultApiKey ?? "")
+        if (currentApiKey === String(prevDefaultApiKey ?? "")) {
+          newParams = { ...newParams, apiKeyEnvVar: nextDefaultApiKey }
+        }
+        const nextResOptions = resSchema?.optionsByProvider?.[nextProvider] ?? resSchema?.options ?? []
+        const validResValues = nextResOptions.map((o: { value: string }) => o.value)
+        const currentRes = String(params.resolution ?? "720p")
+        if (validResValues.length > 0 && !validResValues.includes(currentRes)) {
+          newParams = { ...newParams, resolution: nextResOptions[0].value }
+        }
+      }
+    }
+    onParamsChange(newParams)
+  }, [module.type, params, meta, onParamsChange])
+
   const [scenarioSlots, setScenarioSlots] = useState<Array<{ key: string; kind: string; label?: string }> | null>(null)
   const [audioLibraryOptions, setAudioLibraryOptions] = useState<Array<{ value: string; label: string }> | null>(null)
   const [audioTags, setAudioTags] = useState<string[] | null>(null)
@@ -1725,6 +1778,14 @@ function ModuleBlock({
           if (p.key === "audioId" && mode !== "fixed") return false
           if (p.key === "randomTag" && mode !== "random_by_tag") return false
         }
+        if (p.provider != null) {
+          const currentProvider = String(params.provider ?? "veed-fabric")
+          if (currentProvider !== p.provider) return false
+        }
+        if (p.providerOneOf != null && p.providerOneOf.length > 0) {
+          const currentProvider = String(params.provider ?? "veed-fabric")
+          if (!p.providerOneOf.includes(currentProvider)) return false
+        }
         return true
       })
     : []
@@ -1744,7 +1805,7 @@ function ModuleBlock({
     pending: "border-l-4 border-l-muted/50",
   }
 
-  const renderParam = (p: { key: string; label: string; type: string; default?: unknown; min?: number; max?: number; options?: { value: string; label: string }[] }) => {
+  const renderParam = (p: { key: string; label: string; type: string; default?: unknown; min?: number; max?: number; options?: { value: string; label: string }[]; optionsByProvider?: Record<string, { value: string; label: string }[]>; defaultByProvider?: Record<string, unknown> }, paramsChange: (params: Record<string, unknown>) => void) => {
     const promptVal = String(params[p.key] ?? p.default ?? "")
     const isPureVariable = /^\{\{([A-Za-z0-9_]+)\}\}$/.test(promptVal.trim())
     const textVars = getAvailableVariablesByKind("text")
@@ -1756,7 +1817,7 @@ function ModuleBlock({
         <textarea
           className="h-32 rounded-md border border-input bg-background px-2 py-1.5 text-xs flex-1 font-mono resize-y min-h-[80px]"
           value={String(params[p.key] ?? p.default ?? "")}
-          onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+          onChange={(e) => paramsChange({ ...params, [p.key]: e.target.value })}
           placeholder='{"clips": [], "fps": 30, "width": 1920, "height": 1080}'
           spellCheck={false}
         />
@@ -1767,7 +1828,7 @@ function ModuleBlock({
             <button
               type="button"
               className={`px-2.5 py-1 text-xs ${!isPureVariable ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
-              onClick={() => onParamsChange({ ...params, [p.key]: "" })}
+              onClick={() => paramsChange({ ...params, [p.key]: "" })}
             >
               Manual
             </button>
@@ -1776,7 +1837,7 @@ function ModuleBlock({
               className={`px-2.5 py-1 text-xs ${isPureVariable ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
               onClick={() => {
                 const first = textVars[0]
-                onParamsChange({ ...params, [p.key]: first ? `{{${first}}}` : "" })
+                paramsChange({ ...params, [p.key]: first ? `{{${first}}}` : "" })
               }}
             >
               Variable
@@ -1786,7 +1847,7 @@ function ModuleBlock({
             <select
               className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
               value={promptVal.match(/\{\{([A-Za-z0-9_]+)\}\}/)?.[1] ?? ""}
-              onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value ? `{{${e.target.value}}}` : "" })}
+              onChange={(e) => paramsChange({ ...params, [p.key]: e.target.value ? `{{${e.target.value}}}` : "" })}
             >
               <option value="">— Select —</option>
               {textVars.map((v) => (
@@ -1829,7 +1890,7 @@ function ModuleBlock({
               let v = parseFloat(e.target.value) || 0
               if (p.min != null) v = Math.max(p.min, v)
               if (p.max != null) v = Math.min(p.max, v)
-              onParamsChange({ ...params, [p.key]: v })
+              paramsChange({ ...params, [p.key]: v })
             }}
           />
         )
@@ -1841,14 +1902,15 @@ function ModuleBlock({
         const isFalImageId = module.type === "video.fal.veed-fabric" && p.key === "imageId"
         const isAnyImageId = isHeyGenImageId || isFalImageId
         const tagOptions = (audioTags ?? []).map((t) => ({ value: t, label: t }))
-        const options = isAudioLibrarySelect ? audioLibraryOptions : isAnyImageId ? imageLibraryOptions : isAudioRandomTag ? tagOptions : p.options
+        const providerOptions = p.optionsByProvider?.[currentProvider] ?? p.options
+        const options = isAudioLibrarySelect ? audioLibraryOptions : isAnyImageId ? imageLibraryOptions : isAudioRandomTag ? tagOptions : providerOptions
         if (isAudioRandomTag && tagOptions.length === 0) {
           return (
             <Input
               type="text"
               className="h-7 text-xs flex-1"
               value={String(params[p.key] ?? p.default ?? "")}
-              onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+              onChange={(e) => paramsChange({ ...params, [p.key]: e.target.value })}
               placeholder="Enter tag (add tags to audio items in Content Library)"
             />
           )
@@ -1874,7 +1936,7 @@ function ModuleBlock({
               <select
                 className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1 min-w-0"
                 value={selectedId}
-                onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+                onChange={(e) => paramsChange({ ...params, [p.key]: e.target.value })}
                 disabled={(isAudioLibrarySelect && audioLibraryOptions === null) || (isAnyImageId && imageLibraryOptions === null)}
               >
                 {(isAudioLibrarySelect || isAnyImageId) && <option value="">— Select —</option>}
@@ -1888,12 +1950,14 @@ function ModuleBlock({
             </div>
           )
         }
+        const effectiveDefault = p.defaultByProvider?.[currentProvider] ?? p.default
         return (
           <Input
             type="text"
             className="h-7 text-xs flex-1"
-            value={String(params[p.key] ?? p.default ?? "")}
-            onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+            value={String(params[p.key] ?? effectiveDefault ?? "")}
+            onChange={(e) => paramsChange({ ...params, [p.key]: e.target.value })}
+            placeholder={effectiveDefault != null ? String(effectiveDefault) : undefined}
           />
         )
       })()}
@@ -1901,7 +1965,7 @@ function ModuleBlock({
         <input
           type="checkbox"
           checked={Boolean(params[p.key] ?? p.default)}
-          onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.checked })}
+          onChange={(e) => paramsChange({ ...params, [p.key]: e.target.checked })}
           className="h-4 w-4"
         />
       )}
@@ -2071,14 +2135,14 @@ function ModuleBlock({
                         <button
                           type="button"
                           className={`px-2.5 py-1 text-xs ${sceneSource === "variable" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
-                          onClick={() => onParamsChange({ ...params, sceneSource: "variable" })}
+                          onClick={() => handleParamsChange({ ...params, sceneSource: "variable" })}
                         >
                           Variable
                         </button>
                         <button
                           type="button"
                           className={`px-2.5 py-1 text-xs ${sceneSource === "inline" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
-                          onClick={() => onParamsChange({ ...params, sceneSource: "inline" })}
+                          onClick={() => handleParamsChange({ ...params, sceneSource: "inline" })}
                         >
                           Inline JSON
                         </button>
@@ -2098,7 +2162,7 @@ function ModuleBlock({
                         <textarea
                           className="h-36 rounded-md border border-input bg-background px-2 py-1.5 text-xs font-mono resize-y min-h-[80px]"
                           value={String(params.sceneJsonInline ?? "")}
-                          onChange={(e) => onParamsChange({ ...params, sceneJsonInline: e.target.value })}
+                          onChange={(e) => handleParamsChange({ ...params, sceneJsonInline: e.target.value })}
                           placeholder='{"clips": [], "fps": 30, "width": 1920, "height": 1080}'
                           spellCheck={false}
                         />
@@ -2196,7 +2260,7 @@ function ModuleBlock({
         <div className="space-y-2 pt-2 border-t">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Parameters</span>
           <div className="space-y-2">
-            {paramsToShow.map((p) => renderParam(p))}
+            {paramsToShow.map((p) => renderParam(p, handleParamsChange))}
           </div>
         </div>
       )}

@@ -10,6 +10,7 @@ import { LlmScenarioGeneratorModule } from './modules/llm-scenario-generator.js'
 import { AudioLibrarySelectModule } from './modules/audio-library-select.js';
 import { HeyGenAvatarVideoModule } from './modules/heygen-avatar-video.js';
 import { FalVeedFabricAvatarModule } from './modules/fal-veed-fabric-avatar.js';
+import { SttElevenlabsModule } from './modules/stt-elevenlabs.js';
 
 const modules = new Map<string, WorkflowModule>();
 
@@ -28,6 +29,7 @@ register(new LlmScenarioGeneratorModule());
 register(new AudioLibrarySelectModule());
 register(new HeyGenAvatarVideoModule());
 register(new FalVeedFabricAvatarModule());
+register(new SttElevenlabsModule());
 
 export function getModule(type: string): WorkflowModule | undefined {
   return modules.get(type);

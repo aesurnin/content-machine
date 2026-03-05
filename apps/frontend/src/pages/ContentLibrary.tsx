@@ -74,6 +74,8 @@ export function ContentLibrary() {
   }, [])
 
   useEffect(() => {
+    setItems([])
+    setExpandedId(null)
     if (category === "audio" || category === "images") {
       setLoading(true)
       addLog(`[Content Library] Loading ${category}…`)
@@ -83,7 +85,6 @@ export function ContentLibrary() {
         addLog(`[Content Library] Loaded ${list.length} item(s)`)
       })
     } else {
-      setItems([])
       setLoading(false)
     }
   }, [category, addLog])
@@ -347,7 +348,7 @@ export function ContentLibrary() {
                           )}
                         </button>
                         <div className="flex items-center gap-2 min-w-0">
-                          {category === "images" ? (
+                          {category === "images" && item.type === "image" ? (
                             <img
                               src={`/api/content-library/image/${item.id}/file`}
                               alt=""
@@ -386,7 +387,7 @@ export function ContentLibrary() {
                       </div>
                       {expandedId === item.id && (
                         <div className="px-4 py-2 bg-muted/10 border-t border-border/30">
-                          {category === "images" ? (
+                          {category === "images" && item.type === "image" ? (
                             <img
                               src={`/api/content-library/image/${item.id}/file`}
                               alt={item.name}

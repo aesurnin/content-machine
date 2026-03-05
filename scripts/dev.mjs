@@ -70,6 +70,10 @@ async function main() {
   const strategy = env.RECORDING_STRATEGY || 'puppeteer-stream';
   const useStreamWorker = strategy === 'puppeteer-stream';
 
+  const redisPort = parseInt(env.REDIS_PORT || '6380', 10);
+  const backendPort = parseInt(env.PORT || '3001', 10);
+  process.env.PORT = String(backendPort);
+
   if (useStreamWorker) {
     console.log('Starting Docker (postgres, redis only — worker runs locally)...');
     await run('docker-compose', ['stop', 'screencast-worker']).catch(() => {});
@@ -80,7 +84,7 @@ async function main() {
   }
 
   console.log('Waiting for Redis...');
-  await waitForPort(6379, 'Redis');
+  await waitForPort(redisPort, 'Redis');
 
   console.log('Docker services:');
   await run('docker-compose', ['ps']);
@@ -102,7 +106,7 @@ async function main() {
   if (useStreamWorker) {
     console.log('Starting backend first (frontend will wait for it)...');
     const workerEnv = [
-      'BACKEND_URL=http://localhost:3000',
+      `BACKEND_URL=http://localhost:${backendPort}`,
       env.SCREENCAST_PREVIEW_SECRET ? `SCREENCAST_PREVIEW_SECRET=${env.SCREENCAST_PREVIEW_SECRET}` : '',
     ].filter(Boolean).join(' ');
     backendProc = spawn('npm', ['run', 'dev:backend'], {
@@ -111,7 +115,7 @@ async function main() {
       shell: true,
       env: process.env,
     });
-    await waitForPort(3000, 'Backend');
+    await waitForPort(backendPort, 'Backend');
     await run(
       `npx concurrently -n frontend,worker -c green,magenta "npm run dev:frontend" "${workerEnv} npm run worker"`,
       []
@@ -124,7 +128,7 @@ async function main() {
       shell: true,
       env: process.env,
     });
-    await waitForPort(3000, 'Backend');
+    await waitForPort(backendPort, 'Backend');
     console.log('Starting frontend...');
     await run('npm', ['run', 'dev:frontend']);
   }

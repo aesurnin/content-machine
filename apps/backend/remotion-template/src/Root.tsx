@@ -2,6 +2,10 @@ import React from 'react';
 import { Composition } from 'remotion';
 import { SceneComposition, type RemotionSceneProps } from './SceneComposition';
 
+// Load Reels-style fonts (Bebas Neue, Montserrat, Oswald)
+const FONT_LINK =
+  "https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Montserrat:wght@600;700&family=Oswald:wght@600;700&display=swap";
+
 const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 const DEFAULT_FPS = 30;
@@ -10,6 +14,7 @@ const DEFAULT_DURATION = 30 * 30; // 30 seconds
 export const RemotionRoot: React.FC = () => {
   return (
     <>
+      <link rel="stylesheet" href={FONT_LINK} />
       <Composition
         id="Scene"
         component={SceneComposition}

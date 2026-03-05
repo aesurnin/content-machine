@@ -30,6 +30,14 @@ export interface ModuleParamSchema {
   min?: number;
   max?: number;
   options?: { value: string; label: string }[];
+  /** Show this param only when another param (e.g. provider) equals this value */
+  provider?: string;
+  /** Show this param when provider is one of these values */
+  providerOneOf?: string[];
+  /** Options keyed by provider value; used when param visibility depends on provider */
+  optionsByProvider?: Record<string, { value: string; label: string }[]>;
+  /** Default value keyed by provider; used when param default depends on provider */
+  defaultByProvider?: Record<string, unknown>;
 }
 
 /** Slot kind for input/output */

@@ -28,4 +28,6 @@ The LLM Scenario Generator (`llm.scenario.generator`) produces JSON that is cons
 
 **Text clip**: type, text, from, durationInFrames, position (bottom|top|center), fontSize, color
 
+**Subtitle clip**: type, from, durationInFrames, captions (Caption[] or "{{voice_captions}}"), combineTokensWithinMs (ms window to group words per page, default 1200), position (bottom|top|center|bottom-left|bottom-right|top-left|top-right, default "bottom"), positionOffset (px, default 40), x (% offset from center), y (same) — when both set, override position, fontSize (default 36), color (inactive word, default "#ffffff"), activeColor (currently spoken word, default "#FFD700"), bgColor, bgOpacity, fontFamily ("reels"|"clean"|"bold" or CSS string, default "reels"). Uses @remotion/captions with createTikTokStyleCaptions for word-by-word highlighting. When using "{{voice_captions}}", add slot { key: "voice_captions", kind: "text", label: "Voice Captions JSON" }. Caption format: { text, startMs, endMs, timestampMs, confidence }.
+
 **Audio clip**: type, src, from, durationInFrames, volume (0 = mute, 1 = normal, >1 = amplify)

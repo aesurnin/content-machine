@@ -14,14 +14,13 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 
-const BUCKET = process.env.R2_BUCKET_NAME!;
-const ENDPOINT = process.env.R2_ENDPOINT!;
-
 let client: S3Client | null = null;
 
 function getClient(): S3Client {
   if (!client) {
-    if (!BUCKET || !ENDPOINT) {
+    const bucket = process.env.R2_BUCKET_NAME;
+    const endpoint = process.env.R2_ENDPOINT;
+    if (!bucket || !endpoint) {
       throw new Error('R2_BUCKET_NAME and R2_ENDPOINT must be set');
     }
     const httpsAgent = new https.Agent({
@@ -31,16 +30,22 @@ function getClient(): S3Client {
     });
     client = new S3Client({
       region: 'auto',
-      endpoint: ENDPOINT,
+      endpoint,
       credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID!,
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
       },
       forcePathStyle: true,
       requestHandler: new NodeHttpHandler({ httpsAgent }),
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
     });
   }
   return client;
+}
+
+function getBucket(): string {
+  return process.env.R2_BUCKET_NAME!;
 }
 
 export function isR2Configured(): boolean {
@@ -60,7 +65,7 @@ export async function uploadToR2(
   const ct = contentType ?? 'video/mp4';
   const s3 = getClient();
   const command = new PutObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: key,
     Body: buffer,
     ContentType: ct,
@@ -78,7 +83,7 @@ export async function deleteFromR2(key: string): Promise<void> {
   const s3 = getClient();
   await s3.send(
     new DeleteObjectCommand({
-      Bucket: BUCKET,
+      Bucket: getBucket(),
       Key: key,
     })
   );
@@ -90,7 +95,7 @@ export async function deletePrefixFromR2(prefix: string): Promise<void> {
   do {
     const listRes = await s3.send(
       new ListObjectsV2Command({
-        Bucket: BUCKET,
+        Bucket: getBucket(),
         Prefix: prefix,
         ContinuationToken: continuationToken,
       })
@@ -99,7 +104,7 @@ export async function deletePrefixFromR2(prefix: string): Promise<void> {
     if (keys.length > 0) {
       await s3.send(
         new DeleteObjectsCommand({
-          Bucket: BUCKET,
+          Bucket: getBucket(),
           Delete: {
             Objects: keys.map((Key) => ({ Key })),
             Quiet: true,
@@ -114,7 +119,7 @@ export async function deletePrefixFromR2(prefix: string): Promise<void> {
 export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<string> {
   const s3 = getClient();
   const command = new GetObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: key,
   });
   return getSignedUrl(s3, command, { expiresIn });
@@ -123,7 +128,7 @@ export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<st
 export async function getObjectFromR2(key: string): Promise<Buffer> {
   const s3 = getClient();
   const command = new GetObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: key,
   });
   const res = await s3.send(command);
@@ -150,7 +155,7 @@ export async function streamObjectFromR2(
 ): Promise<StreamObjectResult> {
   const s3 = getClient();
   const command = new GetObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: key,
     ...(range && { Range: range }),
   });
@@ -177,7 +182,7 @@ export async function listObjectsFromR2(prefix: string): Promise<string[]> {
   do {
     const res = await s3.send(
       new ListObjectsV2Command({
-        Bucket: BUCKET,
+        Bucket: getBucket(),
         Prefix: prefix,
         ContinuationToken: continuationToken,
       })
@@ -222,7 +227,7 @@ export async function listObjectsWithMetaFromR2(prefix: string): Promise<R2Objec
   do {
     const res = await s3.send(
       new ListObjectsV2Command({
-        Bucket: BUCKET,
+        Bucket: getBucket(),
         Prefix: prefix,
         ContinuationToken: continuationToken,
       })

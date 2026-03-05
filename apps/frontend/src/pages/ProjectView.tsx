@@ -411,7 +411,7 @@ export function ProjectView({
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "network error"
-      addLog(`Stop failed: ${msg}. Is backend running on port 3000?`, "error")
+      addLog(`Stop failed: ${msg}. Is the backend running?`, "error")
     } finally {
       setStopping(false)
     }

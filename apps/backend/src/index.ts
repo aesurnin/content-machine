@@ -129,7 +129,8 @@ const start = async () => {
       console.log('[Startup] Redis OK');
     }
 
-    await server.listen({ port: 3000, host: '0.0.0.0' });
+    const port = parseInt(process.env.PORT || '3000', 10);
+    await server.listen({ port, host: '0.0.0.0' });
     console.log(`Server listening on ${server.server.address()}`);
     startWorkflowWorker();
   } catch (err) {

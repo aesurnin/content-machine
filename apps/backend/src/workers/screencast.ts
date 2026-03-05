@@ -24,7 +24,7 @@ function parseRedisUrl(url: string): { host: string; port: number } {
 }
 
 const redisOpts = parseRedisUrl(REDIS_URL);
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3000';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 const PREVIEW_SECRET = process.env.SCREENCAST_PREVIEW_SECRET || '';
 const PREVIEW_INTERVAL_MS = 500;
 const DEFAULT_VIEWPORT_WIDTH = 1920;
