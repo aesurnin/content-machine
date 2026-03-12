@@ -61,6 +61,22 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
+      - name: Setup SSH and test connection
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -e
+          echo "Host=$SSH_HOST User=$SSH_USER"
+          echo "Key length=${#SSH_KEY} chars"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null && echo "Key format OK" || { echo "Key invalid"; exit 1; }
+          echo "Testing SSH..."
+          ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${SSH_USER}@${SSH_HOST} "echo OK" 2>&1 | tail -20
+
       - name: Deploy to VPS
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -74,10 +90,9 @@ jobs:
         run: |
           set -e
           DEPLOY_DIR="${DEPLOY_PATH:-/root/online-game-commenter}"
-          echo "Deploying to ${SSH_USER}@${SSH_HOST} path=$DEPLOY_DIR"
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          echo "Deploying to ${SSH_USER}@${SSH_HOST} path=$DEPLOY_DIR"
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${SSH_USER}@${SSH_HOST} "set -ex
             cd $DEPLOY_DIR
             git fetch origin main && git reset --hard origin/main
