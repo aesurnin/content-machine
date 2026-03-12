@@ -14,7 +14,6 @@ import { ModulePickerPanel } from "@/components/ModulePickerPanel"
 import { AgentReasoningOverlay } from "@/components/AgentReasoningOverlay"
 
 const PROJECT_LAYOUT_STORAGE_KEY = "project-layout-videos-assets-main"
-const PROJECT_PANELS_VISIBLE_KEY = "project-panels-visible"
 
 type VideoEntity = {
   id: string
@@ -524,20 +523,6 @@ export function ProjectView({
       })
     }
     addLog(`Selected video ${video.id.slice(0, 8)}`, "info", video.id)
-  }
-
-  async function handleRenameProject(newName: string) {
-    if (!id || !newName.trim()) return
-    const r = await fetch(`/api/projects/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newName.trim() }),
-      credentials: "include",
-    })
-    if (r.ok) {
-      setProject((p) => (p ? { ...p, name: newName.trim() } : p))
-      setEditingProjectName(false)
-    }
   }
 
   async function handleRenameVideo(video: VideoEntity, newName: string) {

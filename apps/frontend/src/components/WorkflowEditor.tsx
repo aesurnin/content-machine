@@ -239,7 +239,8 @@ export function WorkflowEditor() {
   const { selectedVideo, refreshAssets } = useSelectedVideo()
   const { addLog, fetchLogsForVideo } = useLogs()
   const workflowVariable = useWorkflowVariable()
-  const { setAgentOverlay } = useWorkflowJob()
+  const ctx = useWorkflowJob()
+  const setAgentOverlay = ctx?.setAgentOverlay
   const { setPreviewVideo } = usePreviewVideo()
   const { liveRemotion, setLiveRemotion } = useLiveRemotion()
   const { openAddStepPanel, closeAddStepPanel, setOnSelectModule } = useAddStepPanel()
@@ -279,7 +280,7 @@ export function WorkflowEditor() {
     activeJobId,
     jobProgress,
     jobMessage,
-    jobLogs,
+    jobLogs: _jobLogs,
     jobStepIndex,
     jobAgentReasoningSteps,
     lastTotalTokenUsage,
@@ -1634,9 +1635,9 @@ function ModuleBlock({
   onClearCache,
   onPreview,
   onScenePreview,
-  remotionSceneUrl,
+  remotionSceneUrl: _remotionSceneUrl,
   getModuleLabel,
-  getAvailableVariables,
+  getAvailableVariables: _getAvailableVariables,
   getAvailableVariablesByKind,
   onOpenCrop,
   onOpenPromptBuilder,

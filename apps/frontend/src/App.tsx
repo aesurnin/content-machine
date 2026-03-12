@@ -162,7 +162,7 @@ function AppHeader() {
         <VariableManagerModal
           isOpen={workflowVariable.variableManagerOpen}
           onClose={workflowVariable.closeVariableManager}
-          workflow={workflowVariable.workflow}
+          workflow={workflowVariable.workflow as { name: string; modules: Array<{ id: string; type: string; inputs?: Record<string, string>; outputs?: Record<string, string> }> } | null}
           moduleTypes={workflowVariable.moduleTypes}
         />
       )}

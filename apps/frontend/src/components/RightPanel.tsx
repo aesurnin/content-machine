@@ -10,7 +10,6 @@ import type { RefObject } from "react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 
 const RIGHT_LAYOUT_STORAGE_KEY = "app-layout-right-workflow-logs"
-const RIGHT_PANELS_VISIBLE_KEY = "right-panels-visible"
 
 export function RightPanel({
   panelRef,
@@ -53,10 +52,6 @@ export function RightPanel({
   }
 
   const layout = defaultLayout()
-
-  const handleCollapse = () => {
-    panelRef.current?.collapse()
-  }
 
   const handleExpand = () => {
     panelRef.current?.expand()
