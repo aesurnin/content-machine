@@ -1,14 +1,16 @@
 import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { X, Plus, Trash2, Loader2 } from "lucide-react"
+import { X, Plus, Trash2, Loader2, Pencil } from "lucide-react"
 
-export type EnvEntry = { key: string; value: string }
+export type EnvEntry = { key: string }
 
 interface EnvManagerModalProps {
   isOpen: boolean
   onClose: () => void
 }
+
+const MASKED_VALUE = "••••••••"
 
 export function EnvManagerModal({ isOpen, onClose }: EnvManagerModalProps) {
   const [list, setList] = useState<EnvEntry[]>([])
@@ -18,6 +20,8 @@ export function EnvManagerModal({ isOpen, onClose }: EnvManagerModalProps) {
   const [newValue, setNewValue] = useState("")
   const [saving, setSaving] = useState(false)
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState("")
 
   const fetchList = async () => {
     setLoading(true)
@@ -40,8 +44,35 @@ export function EnvManagerModal({ isOpen, onClose }: EnvManagerModalProps) {
       fetchList()
       setNewKey("")
       setNewValue("")
+      setEditingKey(null)
+      setEditValue("")
     }
   }, [isOpen])
+
+  const handleEdit = async (key: string) => {
+    const value = editValue.trim()
+    setError(null)
+    setSaving(true)
+    try {
+      const r = await fetch("/api/env", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, value }),
+        credentials: "include",
+      })
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}))
+        throw new Error(data.error || "Failed to save")
+      }
+      setEditingKey(null)
+      setEditValue("")
+      await fetchList()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save")
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const handleAdd = async () => {
     const key = newKey.trim()
@@ -106,7 +137,7 @@ export function EnvManagerModal({ isOpen, onClose }: EnvManagerModalProps) {
 
         <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
           <p className="text-sm text-muted-foreground">
-            Variables you add here are available project-wide (e.g. in workflows and backend). Keys must be valid env names (letters, numbers, underscore).
+            Variables you add here are available project-wide (e.g. in workflows and backend). Keys must be valid env names (letters, numbers, underscore). Values are never shown after saving.
           </p>
 
           {/* Add new */}
@@ -155,28 +186,81 @@ export function EnvManagerModal({ isOpen, onClose }: EnvManagerModalProps) {
               <p className="text-sm text-muted-foreground py-4">No variables yet. Add one above.</p>
             ) : (
               <ul className="rounded border bg-panel-3 divide-y divide-border overflow-hidden">
-                {list.map(({ key: k, value: v }) => (
+                {list.map(({ key: k }) => (
                   <li key={k} className="flex items-center gap-2 px-3 py-2 group">
                     <span className="font-mono text-sm font-medium shrink-0 w-40 truncate" title={k}>
                       {k}
                     </span>
-                    <span className="font-mono text-sm text-muted-foreground flex-1 min-w-0 truncate" title={v}>
-                      {v || "(empty)"}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100 hover:text-destructive"
-                      onClick={() => handleDelete(k)}
-                      disabled={deletingKey === k}
-                      title="Delete"
-                    >
-                      {deletingKey === k ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
+                    {editingKey === k ? (
+                      <>
+                        <Input
+                          type="password"
+                          placeholder="New value"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleEdit(k)
+                            if (e.key === "Escape") {
+                              setEditingKey(null)
+                              setEditValue("")
+                            }
+                          }}
+                          className="font-mono text-sm flex-1 h-8"
+                          autoFocus
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="shrink-0"
+                          onClick={() => {
+                            setEditingKey(null)
+                            setEditValue("")
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="shrink-0"
+                          onClick={() => handleEdit(k)}
+                          disabled={saving}
+                        >
+                          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save"}
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono text-sm text-muted-foreground flex-1 min-w-0">
+                          {MASKED_VALUE}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100"
+                          onClick={() => {
+                            setEditingKey(k)
+                            setEditValue("")
+                          }}
+                          title="Edit value"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100 hover:text-destructive"
+                          onClick={() => handleDelete(k)}
+                          disabled={deletingKey === k}
+                          title="Delete"
+                        >
+                          {deletingKey === k ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>

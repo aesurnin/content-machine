@@ -12,10 +12,10 @@ const envRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
-  /** List all app env variables (keys and values) */
+  /** List app env variable keys only (values never exposed for security) */
   fastify.get('/', async (_request, reply) => {
-    const rows = await db.select().from(appEnv).orderBy(appEnv.key);
-    return reply.send(rows.map((r) => ({ key: r.key, value: r.value })));
+    const rows = await db.select({ key: appEnv.key }).from(appEnv).orderBy(appEnv.key);
+    return reply.send(rows.map((r) => ({ key: r.key })));
   });
 
   /** Set or create a variable. Body: { key: string, value: string } */
@@ -37,7 +37,7 @@ const envRoutes: FastifyPluginAsync = async (fastify) => {
         set: { value },
       });
     await refreshAppEnvInProcess();
-    return reply.status(201).send({ key, value });
+    return reply.status(201).send({ key });
   });
 
   /** Delete a variable */
