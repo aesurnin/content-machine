@@ -62,37 +62,28 @@ jobs:
 
     steps:
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.0.3
         env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           IMAGE_BACKEND: ${{ env.IMAGE_BACKEND }}
           IMAGE_FRONTEND: ${{ env.IMAGE_FRONTEND }}
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH,IMAGE_BACKEND,IMAGE_FRONTEND
-          debug: true
-          script_stop: true
-          script: |
-            set -ex
-            echo "=== Deploy start ==="
-            DEPLOY_DIR="${DEPLOY_PATH:-/root/online-game-commenter}"
-            echo "DEPLOY_DIR=$DEPLOY_DIR"
-            cd "$DEPLOY_DIR" || { echo "cd failed"; exit 1; }
-            echo "=== Git pull ==="
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          set -e
+          DEPLOY_DIR="${DEPLOY_PATH:-/root/online-game-commenter}"
+          echo "Deploying to ${SSH_USER}@${SSH_HOST} path=$DEPLOY_DIR"
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${SSH_USER}@${SSH_HOST} "set -ex
+            cd $DEPLOY_DIR
             git fetch origin main && git reset --hard origin/main
-            echo "=== Docker login ==="
-            if [ -n "${GHCR_TOKEN}" ]; then
-              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-            fi
-            echo "IMAGE_BACKEND=$IMAGE_BACKEND IMAGE_FRONTEND=$IMAGE_FRONTEND"
-            export IMAGE_BACKEND IMAGE_FRONTEND
-            echo "=== Docker pull ==="
+            [ -n \"$GHCR_TOKEN\" ] && echo \"$GHCR_TOKEN\" | docker login ghcr.io -u \"$GITHUB_ACTOR\" --password-stdin
+            export IMAGE_BACKEND=\"$IMAGE_BACKEND\" IMAGE_FRONTEND=\"$IMAGE_FRONTEND\"
             docker compose -f docker-compose.prod.yml pull
-            echo "=== Docker up ==="
             docker compose -f docker-compose.prod.yml up -d
-            docker image prune -f
-            echo "=== Deploy done ==="
+            docker image prune -f"
+          rm -f ~/.ssh/deploy_key
