@@ -74,15 +74,25 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH,IMAGE_BACKEND,IMAGE_FRONTEND
+          debug: true
+          script_stop: true
           script: |
-            set -e
+            set -ex
+            echo "=== Deploy start ==="
             DEPLOY_DIR="${DEPLOY_PATH:-/root/online-game-commenter}"
-            cd "$DEPLOY_DIR"
+            echo "DEPLOY_DIR=$DEPLOY_DIR"
+            cd "$DEPLOY_DIR" || { echo "cd failed"; exit 1; }
+            echo "=== Git pull ==="
             git fetch origin main && git reset --hard origin/main
+            echo "=== Docker login ==="
             if [ -n "${GHCR_TOKEN}" ]; then
               echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             fi
+            echo "IMAGE_BACKEND=$IMAGE_BACKEND IMAGE_FRONTEND=$IMAGE_FRONTEND"
             export IMAGE_BACKEND IMAGE_FRONTEND
+            echo "=== Docker pull ==="
             docker compose -f docker-compose.prod.yml pull
+            echo "=== Docker up ==="
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
+            echo "=== Deploy done ==="
