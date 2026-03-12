@@ -422,7 +422,8 @@ export class LlmScenarioGeneratorModule implements WorkflowModule {
     onProgress?.(70, 'Substituting variables');
 
     // Resolve subtitle captions from file when captions is "{{slot_key}}" and slot is connected
-    const sceneClips = (scene.clips ?? []) as Array<Record<string, unknown>>;
+    const sceneRecord = scene as Record<string, unknown>;
+    const sceneClips = (sceneRecord['clips'] ?? []) as Array<Record<string, unknown>>;
     for (let i = 0; i < sceneClips.length; i++) {
       const clip = sceneClips[i];
       if (clip?.type === 'subtitle' && typeof clip.captions === 'string') {

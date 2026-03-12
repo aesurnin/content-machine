@@ -93,10 +93,8 @@ export class SttElevenlabsModule implements WorkflowModule {
       const fileStream = createReadStream(audioPath);
       
       // The SDK types might define response as any or specific type, we cast to our interface
-      response = (await client.speechToText.convert({
-        file: fileStream,
-        modelId: modelId,
-      })) as unknown as ElevenLabsSttResponse;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      response = (await client.speechToText.convert({ file: fileStream, modelId } as any)) as unknown as ElevenLabsSttResponse;
     } catch (err) {
       onLog?.(`[STT ElevenLabs] ERROR: API request failed: ${(err as Error).message}`);
       return { success: false, error: `ElevenLabs STT API request failed: ${(err as Error).message}` };

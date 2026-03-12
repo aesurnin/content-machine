@@ -113,7 +113,7 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
         }
 
         const idx = stepIndex ?? (workflow.modules?.length ?? 1) - 1;
-        const lastMod = workflow.modules?.[idx];
+        const lastMod = workflow.modules?.[idx] as Record<string, unknown> | undefined;
         if (lastMod?.type === 'video.render.remotion') {
           const folderName = path.basename(cacheDir);
           const remotionSceneUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent('scene.json')}`;

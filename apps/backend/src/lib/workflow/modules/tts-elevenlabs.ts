@@ -173,8 +173,9 @@ export class TtsElevenlabsModule implements WorkflowModule {
           request.previousText = validSegments[i - 1]?.text;
           request.nextText = validSegments[i + 1]?.text;
         }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data: audioStream, rawResponse } = await client.textToSpeech
-          .convert(voiceId, request)
+          .convert(voiceId, request as any)
           .withRawResponse();
 
         const charCount = rawResponse.headers.get('x-character-count');
