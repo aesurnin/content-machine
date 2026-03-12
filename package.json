@@ -6,7 +6,8 @@
     "dev:backend": "cd apps/backend && npm run dev",
     "dev:frontend": "cd apps/frontend && npm run dev",
     "db:push": "cd apps/backend && npm run db:push",
-    "worker": "cd apps/backend && npm run worker"
+    "worker": "cd apps/backend && npm run worker",
+    "docker:prod": "node scripts/docker-prod.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

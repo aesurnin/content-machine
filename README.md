@@ -32,6 +32,18 @@ Platform for video analysis and social media content creation.
 
 **Port conflicts?** This project uses non-standard ports by default (Postgres 5433, Redis 6380, Backend 3001) to avoid conflicts with other projects. Override in `.env` with `POSTGRES_PORT`, `REDIS_PORT`, `PORT` if needed.
 
+## Run Locally in Docker (Production-like)
+
+To test the same stack that runs on the VPS (Backend, Frontend, Postgres, Redis, Traefik — no screencast worker):
+
+```bash
+npm run docker:prod
+```
+
+This builds images, runs migrations, and starts the stack. Open **http://localhost** (port 80). If port 80 is in use, set `PORT_HTTP=8080` in `.env` and use http://localhost:8080.
+
+To stop: `docker compose -f docker-compose.prod.yml down`
+
 ## Screencast Recording (Add Video by URL)
 
 When you add a video by pasting a replay URL, the system records the screen and audio from that page:

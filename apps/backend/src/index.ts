@@ -19,7 +19,8 @@ const server: FastifyInstance = Fastify({
 });
 
 server.register(cors, { 
-  origin: true // In production, restrict this!
+  origin: true,
+  credentials: true,
 });
 
 server.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } }); // 500MB

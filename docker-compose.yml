@@ -1,5 +1,8 @@
 # Ports are configurable via .env to avoid conflicts with other projects:
 # POSTGRES_PORT (default 5433), REDIS_PORT (default 6380)
+# Uses same project name & postgres_data volume as docker-compose.prod.yml — data is shared
+name: online-game-commenter
+
 services:
   postgres:
     image: postgres:15-alpine
