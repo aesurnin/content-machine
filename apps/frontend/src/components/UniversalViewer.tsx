@@ -343,7 +343,6 @@ function withCacheBust(url: string, key: string): string {
 
 export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const [mediaMetadata, setMediaMetadata] = useState<Partial<PreviewAssetMetadata>>({})
-  const [mediaRefreshKey, setMediaRefreshKey] = useState(0)
   const [moduleMetadata, setModuleMetadata] = useState<{
     tokenUsage?: PreviewAssetMetadata["tokenUsage"]
     costUsd?: number
@@ -413,34 +412,6 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
     contentType.startsWith("audio/") ||
     /\.(mp3|wav|ogg|m4a)$/i.test(asset.url.split("?")[0])
   )
-  const mediaUrl = asset?.url
-
-  useEffect(() => {
-    if (!isMedia || !mediaUrl) return
-    let lastModified: string | null = null
-    let cancelled = false
-
-    const checkAndRefresh = () => {
-      const url = mediaUrl.startsWith("http") || mediaUrl.startsWith("/") ? mediaUrl : getFullUrl(mediaUrl)
-      fetch(url, { method: "HEAD", credentials: "include" })
-        .then((r) => {
-          if (cancelled) return
-          const lm = r.headers.get("last-modified")
-          if (lm && lastModified !== null && lm !== lastModified) {
-            setMediaRefreshKey((k) => k + 1)
-          }
-          lastModified = lm
-        })
-        .catch(() => {})
-    }
-
-    checkAndRefresh()
-    const interval = setInterval(checkAndRefresh, 3000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [isMedia, mediaUrl])
 
   const handleVideoMetadata = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
     const v = e.currentTarget
@@ -471,13 +442,24 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const fullUrl = getFullUrl(asset.url)
 
   const header = (
-    <div className="flex items-center justify-between p-3 shrink-0 bg-muted/30 rounded-t-lg">
-      <span className="text-sm font-medium truncate">
+    <div className="flex items-center justify-between gap-2 p-3 shrink-0 bg-muted/30 rounded-t-lg">
+      <span className="text-sm font-medium truncate min-w-0">
         {asset.label ?? "Preview"}
       </span>
-      <Button variant="secondary" size="sm" onClick={onClose}>
-        Back to original
-      </Button>
+      <div className="flex items-center gap-2 shrink-0">
+        <Button
+          variant="outline"
+          size="sm"
+          asChild
+        >
+          <a href={fullUrl} target="_blank" rel="noopener noreferrer">
+            Open in new tab
+          </a>
+        </Button>
+        <Button variant="secondary" size="sm" onClick={onClose}>
+          Back
+        </Button>
+      </div>
     </div>
   )
 
@@ -516,28 +498,34 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   return (
     <div className="w-full max-w-4xl space-y-3">
       <div className="relative bg-black rounded-lg overflow-hidden shadow-lg">
-        <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between p-3 bg-gradient-to-b from-black/80 to-transparent">
-          <span className="text-sm font-medium text-white truncate">
+        <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-2 p-3 bg-gradient-to-b from-black/80 to-transparent">
+          <span className="text-sm font-medium text-white truncate min-w-0">
             {asset.label ?? "Preview"}
           </span>
-          <Button variant="secondary" size="sm" onClick={onClose}>
-            Back to original
-          </Button>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button variant="outline" size="sm" asChild className="border-white/50 text-white hover:bg-white/20">
+              <a href={fullUrl} target="_blank" rel="noopener noreferrer">
+                Open in new tab
+              </a>
+            </Button>
+            <Button variant="secondary" size="sm" onClick={onClose}>
+              Back
+            </Button>
+          </div>
         </div>
         <div className="aspect-video flex items-center justify-center bg-black min-h-[200px]">
           {isVideo && (
             <video
-              key={mediaRefreshKey}
-              src={withCacheBust(asset.url, String(mediaRefreshKey))}
+              src={asset.url}
               controls
+              preload="metadata"
               className="w-full h-full object-contain max-h-[70vh]"
               onLoadedMetadata={handleVideoMetadata}
             />
           )}
           {isImage && (
             <img
-              key={mediaRefreshKey}
-              src={withCacheBust(asset.url, String(mediaRefreshKey))}
+              src={asset.url}
               alt={asset.label ?? "Preview"}
               className="max-w-full max-h-[70vh] object-contain"
               onLoad={handleImageLoad}
@@ -546,8 +534,7 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
           {isAudio && (
             <div className="w-full max-w-lg px-4 py-8">
               <audio
-                key={mediaRefreshKey}
-                src={withCacheBust(asset.url, String(mediaRefreshKey))}
+                src={asset.url}
                 controls
                 className="w-full"
                 onLoadedMetadata={handleAudioMetadata}

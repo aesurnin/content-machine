@@ -134,6 +134,80 @@ async function injectFitCSS(page: { evaluate: (fn: () => void) => Promise<void> 
   });
 }
 
+/** Injects a MutationObserver that continuously hides/clicks the "not optimized for your browser" dialog. */
+async function injectBrowserCompatibilityDialogRemover(
+  frame: { evaluate: (fn: () => void) => Promise<unknown> }
+): Promise<void> {
+  await frame.evaluate(() => {
+    const marker = 'not optimized for your browser';
+    const markerAlt = 'for better experience use safari';
+    function hideOrDismiss(el: Element): boolean {
+      const t = (el.textContent || '').toLowerCase();
+      if (!t.includes(marker) && !t.includes(markerAlt)) return false;
+      const container = el.closest('div[class*="modal"], div[class*="dialog"], div[class*="overlay"], [role="dialog"]') || el;
+      const buttons = container.querySelectorAll('button, [role="button"], a, [class*="button"]');
+      for (const b of buttons) {
+        if ((b.textContent || '').trim().toUpperCase() === 'OK') {
+          (b as HTMLElement).click();
+          return true;
+        }
+      }
+      (container as HTMLElement).style.setProperty('display', 'none');
+      (container as HTMLElement).style.setProperty('visibility', 'hidden');
+      (container as HTMLElement).style.setProperty('opacity', '0');
+      (container as HTMLElement).style.setProperty('pointer-events', 'none');
+      return true;
+    }
+    function scan(root: Document | Element | ShadowRoot): boolean {
+      const iter = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
+      let el: Element | null;
+      while ((el = iter.nextNode() as Element | null)) {
+        if (hideOrDismiss(el)) return true;
+        const shadow = (el as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
+        if (shadow && scan(shadow)) return true;
+      }
+      return false;
+    }
+    const obs = new MutationObserver(() => { scan(document); });
+    obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    scan(document);
+  });
+}
+
+const DEFAULT_UNMUTE_SELECTORS = [
+  '[aria-label*="mute" i]', '[aria-label*="unmute" i]', '[aria-label*="sound" i]', '[aria-label*="volume" i]',
+  'button[class*="mute"]', 'button[class*="volume"]', 'button[class*="sound"]',
+  '[class*="mute"][role="button"]', '[class*="volume"][role="button"]', '[class*="sound"][role="button"]',
+  '[role="graphics-symbol"]', // Rowzones uses this for the speaker icon
+];
+
+async function tryClickUnmute(ctx: { $: (s: string) => Promise<{ click: () => Promise<void>; dispose: () => void } | null>; evaluate: (fn: () => boolean) => Promise<boolean> }, selectors: string[]): Promise<{ clicked: boolean; selector?: string }> {
+  for (const sel of selectors) {
+    try {
+      const el = await ctx.$(sel);
+      if (el) { await el.click(); el.dispose(); return { clicked: true, selector: sel }; }
+    } catch { /* next */ }
+  }
+  try {
+    const ok = await ctx.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="graphics-symbol"], [class*="mute"], [class*="volume"], [class*="sound"]'));
+      const muteBtn = candidates.find((b) => {
+        const label = (b.getAttribute('aria-label') || '').toLowerCase();
+        const title = (b.getAttribute('title') || '').toLowerCase();
+        const cls = (b.className || '').toLowerCase();
+        return (
+          label.includes('mute') || label.includes('unmute') || label.includes('sound') || label.includes('volume') ||
+          title.includes('mute') || title.includes('sound') || title.includes('volume') ||
+          cls.includes('mute') || cls.includes('volume') || cls.includes('sound')
+        );
+      });
+      if (muteBtn && muteBtn instanceof HTMLElement) { muteBtn.click(); return true; }
+      return false;
+    });
+    return { clicked: ok, selector: ok ? '(evaluate)' : undefined };
+  } catch { return { clicked: false }; }
+}
+
 async function tryClickPlay(ctx: { $: (s: string) => Promise<{ click: () => Promise<void>; dispose: () => void } | null>; evaluate: (fn: () => boolean) => Promise<boolean> }, selectors: string[]): Promise<{ clicked: boolean; selector?: string }> {
   for (const sel of selectors) {
     try {
@@ -296,6 +370,7 @@ async function waitForReplayEnd(
 
   // Detect BGaming replay URLs
   const isBGamingReplay = jobData.url.includes('bgaming-network.com/api/replays');
+  let lastRowzonesDialogCheck = 0;
   let lastReplayModeValue: string | null = null;
   let lastReplayModeChange = Date.now();
   let freespinsEndedAt: number | null = null;
@@ -386,6 +461,52 @@ async function waitForReplayEnd(
             }
           } catch (e) { 
             log(`[BGaming] Check error: ${e}`);
+          }
+        }
+
+        // Rowzones: periodically try to dismiss browser compatibility dialog during recording
+        const isRowzones = jobData.url.includes('rowzones.com');
+        if (isRowzones && Date.now() - lastRowzonesDialogCheck > 2000) {
+          lastRowzonesDialogCheck = Date.now();
+          const frames = page.frames ? page.frames() : [page];
+          for (const frame of frames) {
+            try {
+              await frame.evaluate(() => {
+                const marker = 'not optimized for your browser';
+                const markerAlt = 'for better experience use safari';
+                const markers = [marker, markerAlt, 'safari', 'el capitan', 'browser'];
+                const hide = (el: Element) => {
+                  const container = el.closest('div[class*="modal"], div[class*="dialog"], div[class*="overlay"], [role="dialog"]') || el;
+                  const buttons = container.querySelectorAll('button, [role="button"], a, [class*="button"]');
+                  for (const b of buttons) {
+                    if ((b.textContent || '').trim().toUpperCase() === 'OK') {
+                      (b as HTMLElement).click();
+                      return;
+                    }
+                  }
+                  (container as HTMLElement).style.cssText += 'display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;';
+                };
+                const cx = window.innerWidth / 2;
+                const cy = window.innerHeight / 2;
+                const atCenter = document.elementsFromPoint(cx, cy);
+                for (const el of atCenter) {
+                  const t = (el.textContent || '').toLowerCase();
+                  if (markers.some((m) => t.includes(m))) { hide(el); return; }
+                }
+                const walk = (root: Document | Element | ShadowRoot): boolean => {
+                  const iter = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
+                  let el: Element | null;
+                  while ((el = iter.nextNode() as Element | null)) {
+                    const t = (el.textContent || '').toLowerCase();
+                    if (markers.some((m) => t.includes(m))) { hide(el); return true; }
+                    const shadow = (el as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
+                    if (shadow && walk(shadow)) return true;
+                  }
+                  return false;
+                };
+                walk(document);
+              });
+            } catch { /* cross-origin */ }
           }
         }
 
@@ -586,8 +707,41 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     const page = await browser.newPage();
     log('New page created');
-    // We already set defaultViewport in launch, no need to call it twice and cause jumps
-    
+
+    const isRowzones = jobData.url.includes('rowzones.com');
+    let gameName: string | null = null;
+    if (isRowzones) {
+      try {
+        gameName = new URL(jobData.url).searchParams.get('gameName');
+      } catch {}
+      await page.setUserAgent(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
+      );
+      await page.evaluateOnNewDocument((gName: string | null) => {
+        const safariUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
+        try {
+          Object.defineProperty(navigator, 'userAgent', { get: () => safariUA, configurable: true });
+          Object.defineProperty(navigator, 'vendor', { get: () => 'Apple Computer, Inc.', configurable: true });
+          Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel', configurable: true });
+          Object.defineProperty(navigator, 'userAgentData', { get: () => undefined, configurable: true });
+          (window as any).safari = { pushNotification: {} };
+          delete (window as any).chrome;
+        } catch (_) {}
+        if (gName) {
+          try {
+            const existing = localStorage.getItem(gName);
+            const obj = existing ? JSON.parse(existing) : {};
+            obj.muted = false;
+            obj.music_volume = 1;
+            obj.sfx_volume = 1;
+            obj.sound_enabled = true;
+            localStorage.setItem(gName, JSON.stringify(obj));
+          } catch (_) {}
+        }
+      }, gameName);
+      log(`[Rowzones] Set Safari UA + localStorage sound for gameName=${gameName ?? 'auto'}`);
+    }
+
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     log('Going to URL...');
     await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 45000 });
@@ -597,9 +751,53 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     log('Injecting CSS...');
     await injectFitCSS(page);
-    
+
     // Crucial: Wait 5 seconds for the layout and capture extension to stabilize
     await new Promise((r) => setTimeout(r, 5000));
+
+    if (isRowzones) {
+      const injectDialogRemover = async () => {
+        const frames = page.frames ? page.frames() : [page];
+        for (const frame of frames) {
+          try {
+            await injectBrowserCompatibilityDialogRemover(frame);
+          } catch { /* cross-origin iframe */ }
+        }
+      };
+      await injectDialogRemover();
+      log('[Rowzones] Injected dialog remover');
+    }
+
+    // Rowzones: unmute before recording
+    if (isRowzones) {
+      const unmuteSelectors = jobData.unmuteSelectors?.length ? jobData.unmuteSelectors : DEFAULT_UNMUTE_SELECTORS;
+      log('[Unmute] Rowzones: trying to enable sound...');
+      let unmuted = false;
+      for (const frame of page.frames()) {
+        try {
+          const r = await tryClickUnmute(frame as Parameters<typeof tryClickUnmute>[0], unmuteSelectors);
+          if (r.clicked) { log(`[Unmute] OK: ${r.selector}`); unmuted = true; break; }
+        } catch (e) { log(`[Unmute] Frame: ${e}`); }
+      }
+      if (!unmuted) {
+        try {
+          const clicked = await page.evaluate(() => {
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="graphics-symbol"]'));
+            const muteBtn = candidates.find((b) => {
+              const label = (b.getAttribute('aria-label') || '').toLowerCase();
+              const cls = (b.className || '').toLowerCase();
+              return label.includes('mute') || label.includes('sound') || label.includes('volume') || cls.includes('mute') || cls.includes('volume');
+            });
+            if (muteBtn && muteBtn instanceof HTMLElement) { muteBtn.click(); return true; }
+            return false;
+          });
+          if (clicked) { log('[Unmute] OK (evaluate)'); unmuted = true; }
+        } catch { /* ignore */ }
+      }
+      if (!unmuted) log('[Unmute] Could not find mute/sound button');
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
     log('Starting capture...');
     
     stopPreview = startLivePreview(page, videoId, log);
@@ -637,7 +835,6 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
 
     stream.pipe(ffmpegProcess.stdin);
 
-    const isRowzones = jobData.url.includes('rowzones.com');
     if (!jobData.skipPlayClick && !isRowzones) {
       await clickPlayButton(page, videoId, playSelectors, vw, vh, log);
       await new Promise((r) => setTimeout(r, 1000));

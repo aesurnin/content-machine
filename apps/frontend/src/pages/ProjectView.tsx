@@ -1,9 +1,9 @@
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { Group, Panel, Separator } from "react-resizable-panels"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw, RefreshCw } from "lucide-react"
+import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw, RefreshCw, Pencil, Palette } from "lucide-react"
 import { AssetsPanel } from "@/components/AssetsPanel"
 import { UniversalViewer } from "@/components/UniversalViewer"
 import { useLogs } from "@/contexts/LogsContext"
@@ -15,6 +15,11 @@ import { AgentReasoningOverlay } from "@/components/AgentReasoningOverlay"
 
 const PROJECT_LAYOUT_STORAGE_KEY = "project-layout-videos-assets-main"
 
+const TAG_COLORS = [
+  "#3b82f6", "#22c55e", "#eab308", "#f97316",
+  "#ef4444", "#8b5cf6", "#ec4899", "#a1a1aa",
+] as const
+
 type VideoEntity = {
   id: string
   status: string
@@ -23,7 +28,7 @@ type VideoEntity = {
   playUrl?: string
   /** Streaming URL (Range support, no full download) */
   streamUrl?: string
-  metadata?: { error?: string; stopReason?: string; providerId?: string | null }
+  metadata?: { error?: string; stopReason?: string; providerId?: string | null; tagColor?: string | null; originalReplayUrl?: string; recordingStartedAt?: string }
   createdAt?: string
 }
 
@@ -65,8 +70,14 @@ export function ProjectView({
   const [activeWorkflowVideoIds, setActiveWorkflowVideoIds] = useState<Set<string>>(new Set())
   const [providers, setProviders] = useState<{ id: string; name: string }[]>([])
   const [updatingProvider, setUpdatingProvider] = useState(false)
+  const [tagPickerVideoId, setTagPickerVideoId] = useState<string | null>(null)
+  const [updatingTag, setUpdatingTag] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const prevActiveWorkflowVideoIdsRef = useRef<Set<string>>(new Set())
+  const selectedVideoIdRef = useRef<string | null>(null)
   const navigate = useNavigate()
+
+  selectedVideoIdRef.current = selectedVideo?.id ?? null
 
   const savedLayout = ((): { videos: number; assets: number; main: number } => {
     const defaults = { videos: 20, assets: 20, main: 60 }
@@ -133,6 +144,9 @@ export function ProjectView({
       setSelectedVideo((prev) => {
         if (!prev) return null
         const found = vids.find((v) => v.id === prev.id)
+        if (found && prev.status === "processing" && found.status !== "processing") {
+          refreshAssets()
+        }
         return found ?? prev
       })
       setGlobalSelectedVideo((prev) => {
@@ -186,25 +200,37 @@ export function ProjectView({
     return () => clearInterval(interval)
   }, [id, hasProcessing])
 
-  /** Poll active workflow jobs for busy indicators on video cards */
+  /** Poll active workflow jobs for busy indicators on video cards. Refresh assets when workflow completes for selected video. */
   useEffect(() => {
     if (!id) return
     const fetchActive = () => {
       fetch(`/api/projects/${id}/active-workflow-jobs`, { credentials: "include" })
         .then((r) => (r.ok ? r.json() : null))
         .then((data: { jobs?: { videoId: string }[] } | null) => {
-          if (data?.jobs) {
-            setActiveWorkflowVideoIds(new Set(data.jobs.map((j) => j.videoId)))
-          } else {
-            setActiveWorkflowVideoIds(new Set())
-          }
+          const next = new Set(data?.jobs?.map((j) => j.videoId) ?? [])
+          setActiveWorkflowVideoIds((prev) => {
+            const selectedId = selectedVideoIdRef.current
+            if (selectedId && prev.has(selectedId) && !next.has(selectedId)) {
+              refreshAssets()
+            }
+            return next
+          })
         })
         .catch(() => setActiveWorkflowVideoIds(new Set()))
     }
     fetchActive()
     const interval = setInterval(fetchActive, 2000)
     return () => clearInterval(interval)
-  }, [id])
+  }, [id, refreshAssets])
+
+  /** Refresh assets periodically while workflow running or video recording (catches new outputs) */
+  useEffect(() => {
+    const workflowActive = selectedVideo?.id && activeWorkflowVideoIds.has(selectedVideo.id)
+    const recording = selectedVideo?.status === "processing"
+    if (!selectedVideo?.id || (!workflowActive && !recording)) return
+    const interval = setInterval(refreshAssets, 5000)
+    return () => clearInterval(interval)
+  }, [selectedVideo?.id, selectedVideo?.status, activeWorkflowVideoIds, refreshAssets])
 
   useEffect(() => {
     if (!selectedVideo || selectedVideo.status !== "processing") return
@@ -220,6 +246,15 @@ export function ProjectView({
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [videoToDelete])
+
+  useEffect(() => {
+    if (!id) return
+    const onVideoReRecorded = (e: CustomEvent<{ projectId: string; videoId: string }>) => {
+      if (e.detail.projectId === id) refreshVideosAndSelection()
+    }
+    window.addEventListener("video-rerecorded", onVideoReRecorded as EventListener)
+    return () => window.removeEventListener("video-rerecorded", onVideoReRecorded as EventListener)
+  }, [id])
 
   // Detect provider when URL changes (debounced)
   useEffect(() => {
@@ -509,6 +544,7 @@ export function ProjectView({
   }
 
   function handleVideoClick(video: VideoEntity) {
+    if (video.id !== selectedVideo?.id) setEditingVideoId(null)
     setSelectedVideo(video)
     setShowAddForm(false)
     setPreviewVideo(null)
@@ -527,18 +563,25 @@ export function ProjectView({
 
   async function handleRenameVideo(video: VideoEntity, newName: string) {
     if (!id) return
-    const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ displayName: newName.trim() || null }),
-      credentials: "include",
-    })
-    if (r.ok) {
-      setVideos((prev) =>
-        prev.map((v) =>
-          v.id === video.id ? { ...v, displayName: newName.trim() || null } : v
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: newName.trim() || null }),
+        credentials: "include",
+      })
+      if (r.ok) {
+        const displayName = newName.trim() || null
+        setVideos((prev) =>
+          prev.map((v) =>
+            v.id === video.id ? { ...v, displayName } : v
+          )
         )
-      )
+        if (selectedVideo?.id === video.id) {
+          setSelectedVideo((prev) => (prev ? { ...prev, displayName } : null))
+        }
+      }
+    } finally {
       setEditingVideoId(null)
     }
   }
@@ -570,13 +613,62 @@ export function ProjectView({
     }
   }
 
+  async function handleUpdateVideoTag(video: VideoEntity, tagColor: string | null) {
+    if (!id) return
+    setUpdatingTag(true)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metadata: { ...video.metadata, tagColor } }),
+        credentials: "include",
+      })
+      if (r.ok) {
+        const meta = { ...video.metadata, tagColor }
+        setVideos((prev) =>
+          prev.map((v) => (v.id === video.id ? { ...v, metadata: meta } : v))
+        )
+        if (selectedVideo?.id === video.id) {
+          setSelectedVideo((prev) => (prev ? { ...prev, metadata: meta } : null))
+          setGlobalSelectedVideo((prev) =>
+            prev && prev.videoId === video.id ? { ...prev, metadata: meta } : prev
+          )
+        }
+        setTagPickerVideoId(null)
+      }
+    } finally {
+      setUpdatingTag(false)
+    }
+  }
+
+  const duplicateDisplayNames = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const v of videos) {
+      const n = (v.displayName ?? "").trim()
+      if (n) counts[n] = (counts[n] ?? 0) + 1
+    }
+    return new Set(Object.keys(counts).filter((n) => counts[n] > 1))
+  }, [videos])
+
   function getVideoLabel(v: VideoEntity) {
-    if (v.displayName?.trim()) return v.displayName
-    if (v.status === "processing") return "Recording..."
-    if (v.status === "cancelled") return "Cancelled"
-    if (v.status === "failed") return "Failed"
-    if (v.sourceUrl) return `Video ${v.id.slice(0, 8)}`
-    return "No video"
+    let base: string
+    if (v.displayName?.trim()) {
+      base = v.displayName
+    } else if (v.status === "processing") {
+      return "Recording..."
+    } else if (v.status === "cancelled") {
+      return "Cancelled"
+    } else if (v.status === "failed") {
+      return "Failed"
+    } else if (v.sourceUrl) {
+      return `Video ${v.id.slice(0, 8)}`
+    } else {
+      return "No video"
+    }
+    if (duplicateDisplayNames.has(base.trim())) {
+      return `${base} (${v.id.slice(0, 8)})`
+    }
+    return base
   }
 
   if (!project) return <div className="p-8">Loading...</div>
@@ -622,14 +714,17 @@ export function ProjectView({
             </Button>
           </div>
           <div className="flex-1 overflow-y-auto p-1.5 min-h-0">
-            {videos.map((v) => {
+            {[...videos]
+              .sort((a, b) => getVideoLabel(a).localeCompare(getVideoLabel(b), undefined, { sensitivity: "base" }))
+              .map((v) => {
               const isBusy = activeWorkflowVideoIds.has(v.id)
               return (
+              <div key={v.id} className="flex flex-col gap-0">
               <div
-                key={v.id}
                 className={`group flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer hover:bg-muted/80 transition-colors ${
                   selectedVideo?.id === v.id && !showAddForm ? "bg-muted" : ""
-                } ${isBusy ? "border-l-2 border-l-primary bg-primary/5" : ""}`}
+                } ${isBusy ? "border-l-2 border-l-primary bg-primary/5" : v.metadata?.tagColor ? "border-l-2" : ""}`}
+                style={v.metadata?.tagColor && !isBusy ? { borderLeftColor: v.metadata.tagColor } : undefined}
                 onClick={() => handleVideoClick(v)}
               >
                 {isBusy ? (
@@ -637,7 +732,7 @@ export function ProjectView({
                 ) : (
                   <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
                 )}
-                {editingVideoId === v.id ? (
+                {editingVideoId === v.id && selectedVideo?.id !== v.id ? (
                   <Input
                     className="h-6 flex-1 text-sm min-w-0"
                     value={editingVideoName}
@@ -651,17 +746,49 @@ export function ProjectView({
                     }}
                     autoFocus
                   />
+                ) : editingVideoId === v.id ? (
+                  <span className="flex-1 text-sm truncate min-w-0 text-muted-foreground">Editing above...</span>
                 ) : (
-                  <span
-                    className="flex-1 text-sm truncate min-w-0"
-                    onDoubleClick={(e) => {
-                      e.stopPropagation()
-                      setEditingVideoId(v.id)
-                      setEditingVideoName(v.displayName || "")
-                    }}
-                  >
-                    {getVideoLabel(v)}
-                  </span>
+                  <>
+                    <span
+                      className="flex-1 text-sm truncate min-w-0"
+                      onDoubleClick={(e) => {
+                        e.stopPropagation()
+                        setEditingVideoId(v.id)
+                        setEditingVideoName(v.displayName || "")
+                      }}
+                    >
+                      {getVideoLabel(v)}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setEditingVideoId(v.id)
+                        setEditingVideoName(v.displayName || "")
+                      }}
+                      title="Rename"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setTagPickerVideoId(tagPickerVideoId === v.id ? null : v.id)
+                      }}
+                      title="Tag color"
+                    >
+                      <Palette
+                        className="h-3.5 w-3.5"
+                        style={v.metadata?.tagColor ? { color: v.metadata.tagColor } : undefined}
+                      />
+                    </Button>
+                  </>
                 )}
                 {v.status === "failed" && (
                   <Button
@@ -685,7 +812,30 @@ export function ProjectView({
                   <Trash2 className="h-3.5 w-3.5 text-destructive" />
                 </Button>
               </div>
-              )
+              {tagPickerVideoId === v.id && (
+                <div
+                  className="flex items-center gap-1.5 px-2 py-1.5 bg-muted/50 rounded-b-md border-t border-border/50"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {TAG_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      className="w-5 h-5 rounded-full border-2 border-transparent hover:scale-110 hover:border-foreground/50 transition-all shrink-0"
+                      style={{ backgroundColor: color }}
+                      onClick={() => handleUpdateVideoTag(v, color)}
+                      title="Set tag"
+                    />
+                  ))}
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground px-2"
+                    onClick={() => handleUpdateVideoTag(v, null)}
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
+            )
             })}
           </div>
         </Panel>
@@ -763,6 +913,38 @@ export function ProjectView({
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="flex items-center gap-2" title="Tag color">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => setTagPickerVideoId(tagPickerVideoId === selectedVideo.id ? null : selectedVideo.id)}
+                >
+                  <Palette
+                    className="h-4 w-4"
+                    style={selectedVideo.metadata?.tagColor ? { color: selectedVideo.metadata.tagColor } : undefined}
+                  />
+                </Button>
+                {tagPickerVideoId === selectedVideo.id && (
+                  <div className="flex items-center gap-1.5">
+                    {TAG_COLORS.map((color) => (
+                      <button
+                        key={color}
+                        className="w-5 h-5 rounded-full border-2 border-transparent hover:scale-110 hover:border-foreground/50 transition-all shrink-0"
+                        style={{ backgroundColor: color }}
+                        onClick={() => handleUpdateVideoTag(selectedVideo, color)}
+                        title="Set tag"
+                      />
+                    ))}
+                    <button
+                      className="text-xs text-muted-foreground hover:text-foreground px-2"
+                      onClick={() => handleUpdateVideoTag(selectedVideo, null)}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -878,12 +1060,18 @@ export function ProjectView({
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       Recording
                     </span>
-                    {selectedVideo.createdAt && (
-                      <span className="text-xs text-white/80">
-                        {Math.floor((Date.now() - new Date(selectedVideo.createdAt).getTime()) / 1000)}s
-                        {durationLimit != null && ` / ${durationLimit}s max`}
-                      </span>
-                    )}
+                    {(() => {
+                      const startAt = selectedVideo.metadata?.recordingStartedAt ?? selectedVideo.createdAt
+                      if (!startAt) return null
+                      const elapsed = Math.floor((Date.now() - new Date(startAt).getTime()) / 1000)
+                      if (Number.isNaN(elapsed) || elapsed < 0) return null
+                      return (
+                        <span className="text-xs text-white/80">
+                          {elapsed}s
+                          {durationLimit != null && ` / ${durationLimit}s max`}
+                        </span>
+                      )
+                    })()}
                   </div>
                   <div className="flex gap-2">
                     <Button

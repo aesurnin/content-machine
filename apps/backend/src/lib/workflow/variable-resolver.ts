@@ -72,6 +72,42 @@ export async function findOutputInCacheDir(dirPath: string, kind: 'video' | 'tex
   } catch {
     /* dir missing or unreadable */
   }
+
+  // Fallback to R2
+  const isR2Configured = process.env.R2_BUCKET_NAME && process.env.R2_ENDPOINT;
+  if (isR2Configured) {
+    try {
+      // dirPath is something like: /app/workflow-cache/projectId/videoId/folderName
+      const parts = dirPath.split(path.sep);
+      const folderName = parts.pop();
+      const videoId = parts.pop();
+      const projectId = parts.pop();
+      if (projectId && videoId && folderName) {
+        // We can't import listObjectsFromR2 easily due to circular/dependency issues unless we import it
+        // Let's dynamically import to avoid top-level issues if any
+        const { listObjectsFromR2 } = await import('../r2.js');
+        const prefix = `projects/${projectId}/videos/${videoId}/workflow-cache/${folderName}/`;
+        const keys = await listObjectsFromR2(prefix);
+        for (const name of names) {
+          for (const ext of exts) {
+            const full = `${name}${ext}`;
+            if (keys.includes(prefix + full)) {
+              return path.join(dirPath, full);
+            }
+          }
+        }
+        for (const key of keys) {
+          const fileName = key.slice(prefix.length);
+          if (fileName.includes('/')) continue;
+          const ext = path.extname(fileName).toLowerCase();
+          if (exts.includes(ext)) return path.join(dirPath, fileName);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return null;
 }
 
@@ -125,6 +161,27 @@ export async function resolveWorkflowVariables(
       const kind = slot?.kind === 'text' ? 'text' : slot?.kind === 'file' ? 'file' : 'video';
       const outPath = await findOutputInCacheDir(moduleCacheDir, kind);
       if (outPath) {
+        try {
+          await fs.stat(outPath);
+        } catch {
+          // File not found locally, might be on R2
+          const isR2Configured = process.env.R2_BUCKET_NAME && process.env.R2_ENDPOINT;
+          if (isR2Configured) {
+            try {
+              const relPath = path.relative(path.join(getWorkflowCacheBase(), projectId, videoId), outPath).split(path.sep).join('/');
+              // relPath looks like folderName/output.mp4
+              const r2Key = `projects/${projectId}/videos/${videoId}/workflow-cache/${relPath}`;
+              const { getObjectFromR2 } = await import('../r2.js');
+              const buffer = await getObjectFromR2(r2Key);
+              await fs.mkdir(path.dirname(outPath), { recursive: true });
+              await fs.writeFile(outPath, buffer);
+              onLog?.(`[VariableResolver] Downloaded missing ${varName} from R2`);
+            } catch (err) {
+              onLog?.(`[VariableResolver] Failed to download ${varName} from R2: ${err}`);
+            }
+          }
+        }
+
         variables[varName] = outPath;
         onLog?.(`[VariableResolver] ${varName} <- ${path.basename(moduleCacheDir)}/${path.basename(outPath)}`);
       }

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { File, ChevronDown, ChevronRight, Loader2, Folder, Trash2, Eye, SquareArrowOutUpRight, RefreshCw } from "lucide-react"
+import { File, ChevronDown, ChevronRight, Loader2, Folder, Trash2, Eye, SquareArrowOutUpRight, RefreshCw, CheckSquare, Square } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
 import { ConfirmDialog } from "@/components/ui/confirm-dialog"
@@ -38,6 +38,7 @@ type WorkflowCacheFolder = { folderName: string; moduleId: string }
 type PendingDelete =
   | { type: "asset"; asset: Asset }
   | { type: "cache"; folder: WorkflowCacheFolder }
+  | { type: "bulk"; assetKeys: string[] }
   | null
 
 export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
@@ -48,6 +49,7 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
   const [loading, setLoading] = useState(false)
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null)
+  const [selectedAssetKeys, setSelectedAssetKeys] = useState<Set<string>>(new Set())
 
   const projectId = selectedVideo?.projectId
   const videoId = selectedVideo?.videoId
@@ -86,16 +88,30 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
     )
   }
 
+  const selectedCount = selectedAssetKeys.size
+
   const handleConfirmDelete = async () => {
     if (!pendingDelete || !projectId || !videoId) return
-    if (pendingDelete.type === "asset") {
+    if (pendingDelete.type === "bulk") {
+      const { assetKeys } = pendingDelete
+      if (assetKeys.length > 0) {
+        await fetch(`/api/projects/${projectId}/videos/${videoId}/assets`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ keys: assetKeys }),
+        }).then((r) => r.ok && refreshAssets())
+        setSelectedAssetKeys(new Set())
+        refreshAssets()
+      }
+    } else if (pendingDelete.type === "asset") {
       await fetch(`/api/projects/${projectId}/videos/${videoId}/assets`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({ key: pendingDelete.asset.key }),
       }).then((r) => r.ok && refreshAssets())
-    } else {
+    } else if (pendingDelete.type === "cache") {
       await fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/cleanup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -105,6 +121,31 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
     }
   }
 
+  const handleBulkDeleteRequest = () => {
+    if (selectedCount === 0) return
+    setPendingDelete({
+      type: "bulk",
+      assetKeys: Array.from(selectedAssetKeys),
+    })
+  }
+
+  const toggleAssetSelection = (key: string) => {
+    setSelectedAssetKeys((s) => {
+      const next = new Set(s)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectAll = () => {
+    setSelectedAssetKeys(new Set(assets.map((a) => a.key)))
+  }
+
+  const clearSelection = () => {
+    setSelectedAssetKeys(new Set())
+  }
+
   return (
     <div className="flex flex-col h-full min-h-0">
       <ConfirmDialog
@@ -112,11 +153,13 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
         onOpenChange={(open) => !open && setPendingDelete(null)}
         title="Delete confirmation"
         message={
-          pendingDelete?.type === "asset"
-            ? `Delete "${pendingDelete.asset.shortKey}"? This cannot be undone.`
-            : pendingDelete?.type === "cache"
-              ? `Delete workflow cache folder "${pendingDelete.folder.folderName}"? This cannot be undone.`
-              : ""
+          pendingDelete?.type === "bulk"
+            ? `Delete ${pendingDelete.assetKeys.length} asset(s)? This cannot be undone.`
+            : pendingDelete?.type === "asset"
+              ? `Delete "${pendingDelete.asset.shortKey}"? This cannot be undone.`
+              : pendingDelete?.type === "cache"
+                ? `Delete workflow cache folder "${pendingDelete.folder.folderName}"? This cannot be undone.`
+                : ""
         }
         confirmLabel="Delete"
         loadingLabel="Deleting…"
@@ -124,18 +167,49 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
         onConfirm={handleConfirmDelete}
       />
       {!hideHeader && (
-        <div className="px-3 pt-3 pb-2 border-b shrink-0 flex items-center justify-between gap-2">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            Assets
-          </span>
-          <button
-            className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-            onClick={() => refreshAssets()}
-            disabled={loading}
-            title="Reload"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          </button>
+        <div className="px-3 pt-3 pb-2 border-b shrink-0 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Assets
+            </span>
+            <button
+              className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              onClick={() => refreshAssets()}
+              disabled={loading}
+              title="Reload"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            </button>
+          </div>
+          {!loading && assets.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              <button
+                className="text-xs px-2 py-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                onClick={selectAll}
+                title="Select all"
+              >
+                Select all
+              </button>
+              {selectedCount > 0 && (
+                <>
+                  <button
+                    className="text-xs px-2 py-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                    onClick={clearSelection}
+                    title="Clear selection"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    className="text-xs px-2 py-1 rounded hover:bg-destructive/20 hover:text-destructive text-muted-foreground"
+                    onClick={handleBulkDeleteRequest}
+                    title="Delete selected"
+                  >
+                    Delete {selectedCount}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
       <div className="flex-1 overflow-y-auto p-2">
@@ -176,6 +250,8 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
                     key={asset.key}
                     asset={asset}
                     expanded={expandedKey === asset.key}
+                    selected={selectedAssetKeys.has(asset.key)}
+                    onToggleSelection={() => toggleAssetSelection(asset.key)}
                     onToggle={() => setExpandedKey((k) => (k === asset.key ? null : asset.key))}
                     onPreview={() =>
                       asset.previewUrl &&
@@ -267,10 +343,10 @@ function WorkflowCacheRow({
   }
 
   return (
-    <div className="rounded border bg-panel-3 mt-1 overflow-hidden">
+    <div className="rounded border mt-1 overflow-hidden bg-panel-3">
       <div
         className="flex items-center gap-2 px-2 py-1.5 group cursor-pointer hover:bg-muted/50"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => setExpanded((prev) => !prev)}
       >
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -474,22 +550,42 @@ function WorkflowCacheRow({
 function AssetRow({
   asset,
   expanded,
+  selected,
+  onToggleSelection,
   onToggle,
   onPreview,
   onDelete,
 }: {
   asset: Asset
   expanded: boolean
+  selected?: boolean
+  onToggleSelection?: () => void
   onToggle: () => void
   onPreview: () => void
   onDelete: () => void
 }) {
   return (
-    <div className="rounded border bg-panel-3 text-sm">
+    <div className={`rounded border text-sm ${selected ? "ring-1 ring-primary bg-primary/5" : "bg-panel-3"}`}>
       <div
         className="flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-muted/50 group"
         onClick={onToggle}
       >
+        {onToggleSelection ? (
+          <button
+            className="shrink-0 p-0.5 rounded hover:bg-muted"
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleSelection()
+            }}
+            title={selected ? "Deselect" : "Select"}
+          >
+            {selected ? (
+              <CheckSquare className="h-3.5 w-3.5 text-primary" />
+            ) : (
+              <Square className="h-3.5 w-3.5 text-muted-foreground" />
+            )}
+          </button>
+        ) : null}
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         ) : (

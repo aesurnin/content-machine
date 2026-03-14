@@ -39,6 +39,8 @@ export type ScreencastJobData = {
   durationLimit?: number;
   endSelectors?: string[];
   playSelectors?: string[];
+  /** Selectors for mute/sound button to click and enable audio before recording (e.g. Rowzones). */
+  unmuteSelectors?: string[];
   /** When true, skip play button click (e.g. Rowzones where animation starts immediately). */
   skipPlayClick?: boolean;
   /** Provider-specific: selector for element whose value we monitor (e.g. Total Win). If unchanged for idleSeconds, stop. */

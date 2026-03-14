@@ -89,6 +89,25 @@ export async function deleteFromR2(key: string): Promise<void> {
   );
 }
 
+/** Delete multiple R2 objects in batch (up to 1000 per S3 API call). */
+export async function deleteMultipleFromR2(keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  const s3 = getClient();
+  const batchSize = 1000;
+  for (let i = 0; i < keys.length; i += batchSize) {
+    const batch = keys.slice(i, i + batchSize);
+    await s3.send(
+      new DeleteObjectsCommand({
+        Bucket: getBucket(),
+        Delete: {
+          Objects: batch.map((Key) => ({ Key })),
+          Quiet: true,
+        },
+      })
+    );
+  }
+}
+
 export async function deletePrefixFromR2(prefix: string): Promise<void> {
   const s3 = getClient();
   let continuationToken: string | undefined;

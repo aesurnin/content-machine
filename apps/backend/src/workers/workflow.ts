@@ -5,7 +5,6 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { videoEntities } from '../db/schema/index.js';
 import { runWorkflow } from '../lib/workflow/runner.js';
-import { uploadToR2, getPresignedUrl } from '../lib/r2.js';
 import {
   createJob,
   updateJob,
@@ -96,35 +95,18 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
       const ext = lastStep.relativePath.toLowerCase();
       const outputContentType = ext.endsWith('.md') ? 'text/markdown' : ext.endsWith('.json') ? 'application/json' : 'text/plain';
       updateJob(jobId, { outputUrl, outputContentType });
-    } else if (result.context?.currentVideoPath) {
-      try {
-        const buf = await fs.readFile(result.context.currentVideoPath);
-        const suffix = stepIndex != null ? `step-${stepIndex}.mp4` : 'full.mp4';
-        const key = `projects/${projectId}/videos/${videoId}/workflow-output/${suffix}`;
-        await uploadToR2(key, buf, 'video/mp4');
-        const outputUrl = await getPresignedUrl(key, 3600);
-        const jobUpdates: { outputUrl: string; remotionSceneUrl?: string } = { outputUrl };
-
-        const cacheDir = path.dirname(result.context.currentVideoPath);
-        try {
-          await fs.writeFile(path.join(cacheDir, 'r2-uploaded-key.txt'), key, 'utf8');
-        } catch {
-          /* non-fatal: listing will fall back to workflow-cache URL */
-        }
-
-        const idx = stepIndex ?? (workflow.modules?.length ?? 1) - 1;
-        const lastMod = workflow.modules?.[idx] as Record<string, unknown> | undefined;
-        if (lastMod?.type === 'video.render.remotion') {
-          const folderName = path.basename(cacheDir);
-          const remotionSceneUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent('scene.json')}`;
-          jobUpdates.remotionSceneUrl = remotionSceneUrl;
-        }
-        updateJob(jobId, jobUpdates);
-      } catch (e) {
-        const msg = `Upload failed: ${e}`;
-        appendJobLog(jobId, msg);
-        appendVideoLog(videoId, msg);
+    } else if (lastStep?.kind === 'video') {
+      const pathEnc = encodeURIComponent(lastStep.relativePath);
+      const folderEnc = encodeURIComponent(lastStep.cacheFolderName);
+      const outputUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${folderEnc}/file?path=${pathEnc}`;
+      const jobUpdates: { outputUrl: string; remotionSceneUrl?: string } = { outputUrl };
+      const idx = stepIndex ?? (workflow.modules?.length ?? 1) - 1;
+      const lastMod = workflow.modules?.[idx] as Record<string, unknown> | undefined;
+      if (lastMod?.type === 'video.render.remotion') {
+        const remotionSceneUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(lastStep.cacheFolderName)}/file?path=${encodeURIComponent('scene.json')}`;
+        jobUpdates.remotionSceneUrl = remotionSceneUrl;
       }
+      updateJob(jobId, jobUpdates);
     }
 
     updateJob(jobId, {

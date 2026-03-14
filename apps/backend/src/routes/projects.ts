@@ -4,9 +4,9 @@ import { db } from '../db/index.js';
 import { projects, providerTemplates, videoEntities } from '../db/schema/index.js';
 import { and, eq, count } from 'drizzle-orm';
 import z from 'zod';
-import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
+import { uploadToR2, deleteFromR2, deleteMultipleFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
-import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, getWorkflowCacheFolderR2Url, readWorkflowModuleMetadata, readWorkflowModuleSlots } from '../lib/workflow/runner.js';
+import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, readWorkflowModuleMetadata, readWorkflowModuleSlots } from '../lib/workflow/runner.js';
 import { ensurePricingLoaded, calculateCost } from '../lib/workflow/openrouter-pricing.js';
 import { generateScenarioPreview } from '../lib/workflow/modules/llm-scenario-generator.js';
 import { resolveWorkflowVariablesForApi, findOutputInCacheDir } from '../lib/workflow/variable-resolver.js';
@@ -24,7 +24,99 @@ async function resolveProviderForUrl(url: string) {
     return null;
   }
   const templates = await db.select().from(providerTemplates);
-  return templates.find((t) => host.includes(t.urlPattern.toLowerCase())) ?? null;
+  const matches = templates.filter((t) => host.includes(t.urlPattern.toLowerCase()));
+  // Prefer longer (more specific) urlPattern match, e.g. static-r2-fr.rowzones.com over rowzones.com
+  return matches.sort((a, b) => b.urlPattern.length - a.urlPattern.length)[0] ?? null;
+}
+
+async function enqueueScreencastJobForUrl(
+  projectId: string,
+  videoId: string,
+  url: string
+): Promise<void> {
+  const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
+  const provider = await resolveProviderForUrl(url);
+
+  let endSelectors: string[] | undefined;
+  let playSelectors: string[] | undefined;
+  let skipPlayClick: boolean | undefined;
+  let idleValueSelector: string | undefined;
+  let idleSeconds: number | undefined;
+  let consoleEndPatterns: string[] | undefined;
+
+  if (provider) {
+    playSelectors = (provider.playSelectors as string[])?.length ? (provider.playSelectors as string[]) : undefined;
+    endSelectors = (provider.endSelectors as string[])?.length ? (provider.endSelectors as string[]) : undefined;
+    idleValueSelector = provider.idleValueSelector ?? undefined;
+    idleSeconds = provider.idleSeconds ?? 40;
+    consoleEndPatterns = (provider.consoleEndPatterns as string[])?.length ? (provider.consoleEndPatterns as string[]) : undefined;
+    skipPlayClick = (provider as { skipPlayClick?: boolean }).skipPlayClick;
+  }
+  if (!playSelectors?.length) {
+    try {
+      const s = process.env.SCREENCAST_PLAY_SELECTORS;
+      if (s) playSelectors = JSON.parse(s) as string[];
+    } catch { /* ignore */ }
+  }
+  if (!endSelectors?.length) {
+    try {
+      const s = process.env.SCREENCAST_END_SELECTORS;
+      if (s) endSelectors = JSON.parse(s) as string[];
+    } catch { /* ignore */ }
+  }
+  if (!idleValueSelector) {
+    const s = process.env.SCREENCAST_IDLE_SELECTOR;
+    if (s) idleValueSelector = s;
+  }
+  if (idleSeconds == null) {
+    const s = process.env.SCREENCAST_IDLE_SECONDS;
+    if (s) idleSeconds = parseInt(s, 10);
+  }
+  if (!consoleEndPatterns?.length) {
+    try {
+      const s = process.env.SCREENCAST_CONSOLE_END_PATTERNS;
+      if (s) consoleEndPatterns = JSON.parse(s) as string[];
+    } catch { /* ignore */ }
+  }
+  if (url.includes('bgaming-network.com') && !provider) {
+    if (!playSelectors?.length) playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
+    if (!idleValueSelector) idleValueSelector = '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]';
+    if (idleSeconds == null) idleSeconds = 40;
+  }
+  if (url.includes('rowzones.com')) {
+    if (!playSelectors?.length) playSelectors = [];
+    if (!endSelectors?.length) endSelectors = ['[class*="replay-summary"]', '[class*="ReplaySummary"]', '[class*="summary"]'];
+    if (!consoleEndPatterns?.length) consoleEndPatterns = ['shell:modal:active'];
+    skipPlayClick = true;
+  }
+
+  const [existing] = await db.select({ metadata: videoEntities.metadata })
+    .from(videoEntities)
+    .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+  const prevMeta = existing?.metadata != null && typeof existing.metadata === 'object'
+    ? (existing.metadata as Record<string, unknown>)
+    : {};
+  const metadata = {
+    ...prevMeta,
+    originalReplayUrl: url,
+    recordingStartedAt: new Date().toISOString(),
+  };
+  await db.update(videoEntities)
+    .set({ status: 'processing', metadata })
+    .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+
+  await addScreencastJob({
+    projectId,
+    videoId,
+    url,
+    durationLimit,
+    endSelectors,
+    playSelectors,
+    skipPlayClick,
+    idleValueSelector,
+    idleSeconds,
+    consoleEndPatterns,
+  });
 }
 
 const projectsRoutes: FastifyPluginAsync = async (fastify) => {
@@ -350,79 +442,33 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'No source URL to restart' });
     }
 
-    const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
-    const provider = await resolveProviderForUrl(url);
+    await enqueueScreencastJobForUrl(id, videoId, url);
+    return reply.send({ success: true });
+  });
 
-    let endSelectors: string[] | undefined;
-    let playSelectors: string[] | undefined;
-    let skipPlayClick: boolean | undefined;
-    let idleValueSelector: string | undefined;
-    let idleSeconds: number | undefined;
-    let consoleEndPatterns: string[] | undefined;
-
-    if (provider) {
-      playSelectors = (provider.playSelectors as string[])?.length ? (provider.playSelectors as string[]) : undefined;
-      endSelectors = (provider.endSelectors as string[])?.length ? (provider.endSelectors as string[]) : undefined;
-      idleValueSelector = provider.idleValueSelector ?? undefined;
-      idleSeconds = provider.idleSeconds ?? 40;
-      consoleEndPatterns = (provider.consoleEndPatterns as string[])?.length ? (provider.consoleEndPatterns as string[]) : undefined;
-      skipPlayClick = (provider as { skipPlayClick?: boolean }).skipPlayClick;
-    }
-    if (!playSelectors?.length) {
-      try {
-        const s = process.env.SCREENCAST_PLAY_SELECTORS;
-        if (s) playSelectors = JSON.parse(s) as string[];
-      } catch { /* ignore */ }
-    }
-    if (!endSelectors?.length) {
-      try {
-        const s = process.env.SCREENCAST_END_SELECTORS;
-        if (s) endSelectors = JSON.parse(s) as string[];
-      } catch { /* ignore */ }
-    }
-    if (!idleValueSelector) {
-      const s = process.env.SCREENCAST_IDLE_SELECTOR;
-      if (s) idleValueSelector = s;
-    }
-    if (idleSeconds == null) {
-      const s = process.env.SCREENCAST_IDLE_SECONDS;
-      if (s) idleSeconds = parseInt(s, 10);
-    }
-    if (!consoleEndPatterns?.length) {
-      try {
-        const s = process.env.SCREENCAST_CONSOLE_END_PATTERNS;
-        if (s) consoleEndPatterns = JSON.parse(s) as string[];
-      } catch { /* ignore */ }
-    }
-    if (url.includes('bgaming-network.com') && !provider) {
-      if (!playSelectors?.length) playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
-      if (!idleValueSelector) idleValueSelector = '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]';
-      if (idleSeconds == null) idleSeconds = 40;
-    }
-    if (url.includes('rowzones.com')) {
-      if (!playSelectors?.length) playSelectors = []; // Animation starts immediately
-      if (!endSelectors?.length) endSelectors = ['[class*="replay-summary"]', '[class*="ReplaySummary"]', '[class*="summary"]'];
-      if (!consoleEndPatterns?.length) consoleEndPatterns = ['shell:modal:active'];
-      skipPlayClick = true;
-    }
-
-    await db.update(videoEntities)
-      .set({ status: 'processing', metadata: {} })
-      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
-
-    await addScreencastJob({
-      projectId: id,
-      videoId: video.id,
-      url,
-      durationLimit,
-      endSelectors,
-      playSelectors,
-      skipPlayClick,
-      idleValueSelector,
-      idleSeconds,
-      consoleEndPatterns,
+  /** Re-record: replace existing video with a new recording from the same source URL. Keeps project intact. */
+  fastify.post('/:id/videos/:videoId/re-record', async (request, reply) => {
+    const { id, videoId } = request.params as { id: string; videoId: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
     });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
 
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+    if (video.status === 'processing') {
+      return reply.status(400).send({ error: 'Video is already being recorded' });
+    }
+
+    const meta = (video.metadata as Record<string, unknown>) || {};
+    const url = (meta.originalReplayUrl as string) || (video.sourceUrl?.startsWith('http') ? video.sourceUrl : null);
+    if (!url) {
+      return reply.status(400).send({ error: 'No source URL to re-record. This video was uploaded manually or recorded before re-record was supported.' });
+    }
+
+    await enqueueScreencastJobForUrl(id, videoId, url);
     return reply.send({ success: true });
   });
 
@@ -463,7 +509,10 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const schema = z.object({
       displayName: z.string().optional(),
-      metadata: z.object({ providerId: z.string().uuid().nullable().optional() }).optional(),
+      metadata: z.object({
+        providerId: z.string().uuid().nullable().optional(),
+        tagColor: z.string().nullable().optional(),
+      }).optional(),
     });
     const body = schema.safeParse(request.body);
     if (!body.success) return reply.status(400).send(body.error);
@@ -474,6 +523,9 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       const meta = (video.metadata as Record<string, unknown>) ?? {};
       if (body.data.metadata.providerId !== undefined) {
         meta.providerId = body.data.metadata.providerId;
+      }
+      if (body.data.metadata.tagColor !== undefined) {
+        meta.tagColor = body.data.metadata.tagColor;
       }
       updates.metadata = meta;
     }
@@ -518,7 +570,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       listObjectsWithMetaFromR2(prefix1),
       listObjectsWithMetaFromR2(prefix2),
     ]);
-    const all = [...list1, ...list2];
+    const all = [...list1, ...list2].filter((obj) => !obj.key.includes('/workflow-cache/'));
     const assets = await Promise.all(
       all.map(async (obj) => {
         let previewUrl: string | undefined;
@@ -547,9 +599,15 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
   fastify.delete('/:id/videos/:videoId/assets', async (request, reply) => {
     const { id: projectId, videoId } = request.params as { id: string; videoId: string };
-    const schema = z.object({ key: z.string().min(1) });
+    const schema = z.object({
+      key: z.string().min(1).optional(),
+      keys: z.array(z.string().min(1)).optional(),
+    });
     const body = schema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ error: body.error.message });
+
+    const keys = body.data.keys ?? (body.data.key ? [body.data.key] : []);
+    if (keys.length === 0) return reply.status(400).send({ error: 'key or keys required' });
 
     const project = await db.query.projects.findFirst({
       where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
@@ -561,15 +619,17 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
-    const key = body.data.key;
     const allowedPrefix1 = `projects/${projectId}/${videoId}/`;
     const allowedPrefix2 = `projects/${projectId}/videos/${videoId}/`;
-    if (!key.startsWith(allowedPrefix1) && !key.startsWith(allowedPrefix2)) {
-      return reply.status(403).send({ error: 'Asset key not allowed for this video' });
+    const validKeys = keys.filter(
+      (k) => k.startsWith(allowedPrefix1) || k.startsWith(allowedPrefix2)
+    );
+    if (validKeys.length !== keys.length) {
+      return reply.status(403).send({ error: 'One or more asset keys not allowed for this video' });
     }
 
-    await deleteFromR2(key);
-    return reply.send({ success: true });
+    await deleteMultipleFromR2(validKeys);
+    return reply.send({ success: true, deleted: validKeys.length });
   });
 
   fastify.post('/:id/videos/:videoId/workflow-cache/ensure', async (request, reply) => {
@@ -832,18 +892,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
     try {
-      let entries = await listWorkflowCacheFolderContents(projectId, videoId, folderName, subPath);
-      if (!subPath) {
-        const r2Url = await getWorkflowCacheFolderR2Url(projectId, videoId, folderName);
-        if (r2Url) {
-          entries = entries.map((e) => {
-            if (e.type === 'file' && e.name === 'output.mp4') {
-              return { ...e, r2Url };
-            }
-            return e;
-          });
-        }
-      }
+      const entries = await listWorkflowCacheFolderContents(projectId, videoId, folderName, subPath);
       return reply.send({ entries });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -874,10 +923,30 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
     try {
-      const { absolutePath, contentType } = await getWorkflowCacheFilePath(projectId, videoId, folderName, filePath);
+      const { absolutePath, r2Key, contentType } = await getWorkflowCacheFilePath(projectId, videoId, folderName, filePath);
+      
+      const rangeHeader = request.headers.range;
+
+      if (r2Key) {
+        // Stream from R2
+        const { body, contentLength, contentType: r2ContentType, contentRange, statusCode } = await streamObjectFromR2(
+          r2Key,
+          rangeHeader
+        );
+
+        reply.status(statusCode);
+        reply.header('Content-Type', r2ContentType || contentType);
+        reply.header('Content-Length', String(contentLength));
+        reply.header('Accept-Ranges', 'bytes');
+        if (contentRange) reply.header('Content-Range', contentRange);
+
+        return reply.send(body);
+      }
+
+      if (!absolutePath) throw new Error('Not a file');
+
       const stat = fs.statSync(absolutePath);
       const fileSize = stat.size;
-      const rangeHeader = request.headers.range;
 
       if (rangeHeader) {
         const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);

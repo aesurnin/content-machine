@@ -114,6 +114,19 @@ async function seedProviderTemplates() {
     });
     console.log('[Seed] Added Rowzones provider template');
   }
+  const hasRowzonesStaticR2 = existing.some((t) => t.urlPattern.toLowerCase().includes('static-r2-fr.rowzones'));
+  if (!hasRowzonesStaticR2) {
+    await db.insert(providerTemplates).values({
+      name: 'Rowzones (static-r2-fr)',
+      urlPattern: 'static-r2-fr.rowzones.com',
+      playSelectors: [], // Animation starts immediately, no play button
+      endSelectors: ['[class*="replay-summary"]', '[class*="ReplaySummary"]', '[class*="summary"]'],
+      idleValueSelector: undefined,
+      idleSeconds: 40,
+      consoleEndPatterns: ['shell:modal:active'],
+    });
+    console.log('[Seed] Added Rowzones static-r2-fr provider template');
+  }
 }
 
 const start = async () => {

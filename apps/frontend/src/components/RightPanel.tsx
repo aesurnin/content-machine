@@ -1,11 +1,12 @@
 import { useRef, useState, useEffect } from "react"
 import { useLocation } from "react-router-dom"
 import { Group, Panel, Separator } from "react-resizable-panels"
-import { PanelRightOpen, Trash2, Copy } from "lucide-react"
+import { PanelRightOpen, Trash2, Copy, RefreshCw, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { LogsPanel } from "@/components/LogsPanel"
 import { WorkflowEditor } from "@/components/WorkflowEditor"
 import { useLogs } from "@/contexts/LogsContext"
+import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import type { RefObject } from "react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 
@@ -104,9 +105,7 @@ export function RightPanel({
             minSize="20%"
             className="min-h-0 flex flex-col border-b border-border"
           >
-            <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
-              <span className="text-xs text-muted-foreground/70 font-medium">WORKFLOW</span>
-            </div>
+            <WorkflowPanelHeader />
             <div className="flex-1 min-h-0 overflow-hidden">
               <WorkflowEditor />
             </div>
@@ -129,6 +128,59 @@ export function RightPanel({
           </Panel>
         )}
       </Group>
+    </div>
+  )
+}
+
+function WorkflowPanelHeader() {
+  const { selectedVideo } = useSelectedVideo()
+  const { addLog } = useLogs()
+  const [reRecording, setReRecording] = useState(false)
+
+  const handleReRecord = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!selectedVideo?.projectId || !selectedVideo?.videoId || !selectedVideo?.metadata?.originalReplayUrl) return
+    addLog(`Re-recording video ${selectedVideo.videoId.slice(0, 8)}...`, "info", selectedVideo.videoId)
+    setReRecording(true)
+    try {
+      const r = await fetch(
+        `/api/projects/${selectedVideo.projectId}/videos/${selectedVideo.videoId}/re-record`,
+        { method: "POST", credentials: "include" }
+      )
+      if (r.ok) {
+        addLog("Re-recording started — new video will replace the current one")
+        window.dispatchEvent(
+          new CustomEvent("video-rerecorded", { detail: { projectId: selectedVideo.projectId, videoId: selectedVideo.videoId } })
+        )
+      } else {
+        const err = await r.json().catch(() => ({}))
+        addLog(`Re-record failed: ${err.error ?? r.status}`, "error")
+      }
+    } catch {
+      addLog("Re-record failed: network error", "error")
+    } finally {
+      setReRecording(false)
+    }
+  }
+
+  const canReRecord = selectedVideo?.projectId && selectedVideo?.videoId && selectedVideo?.metadata?.originalReplayUrl
+
+  return (
+    <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
+      <span className="text-xs text-muted-foreground/70 font-medium">WORKFLOW</span>
+      {canReRecord && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 text-muted-foreground hover:text-foreground"
+          onClick={handleReRecord}
+          disabled={reRecording}
+          title="Re-record main video (overwrites original)"
+        >
+          {reRecording ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          <span className="text-xs">Overwrite original video</span>
+        </Button>
+      )}
     </div>
   )
 }

@@ -8,8 +8,8 @@ type SelectedVideo = {
   playUrl?: string | null
   /** Streaming URL (Range support, prefer for video src) */
   streamUrl?: string | null
-  /** Video metadata, e.g. providerId for provider-specific crop */
-  metadata?: { providerId?: string | null }
+  /** Video metadata, e.g. providerId for provider-specific crop, originalReplayUrl for re-record */
+  metadata?: { providerId?: string | null; originalReplayUrl?: string }
 } | null
 
 const SelectedVideoContext = createContext<{

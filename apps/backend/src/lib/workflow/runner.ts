@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import type { WorkflowDefinition, WorkflowContext, WorkflowModuleDef } from './types.js';
 import { getModule } from './registry.js';
-import { getObjectFromR2, getPresignedUrl } from '../r2.js';
+import { getObjectFromR2, getPresignedUrl, isR2Configured, uploadToR2, listObjectsFromR2, listObjectsWithMetaFromR2, deletePrefixFromR2 } from '../r2.js';
 import { resolveWorkflowVariables } from './variable-resolver.js';
 import { ensurePricingLoaded, calculateCost } from './openrouter-pricing.js';
 
@@ -119,10 +119,27 @@ export async function readWorkflowModuleMetadata(
   videoId: string,
   folderName: string
 ): Promise<{ executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string } | null> {
+  let raw: string | null = null;
   const cacheBase = getWorkflowCacheBase();
   const p = path.join(cacheBase, projectId, videoId, folderName, METADATA_FILE);
+  
   try {
-    const raw = await fs.readFile(p, 'utf8');
+    raw = await fs.readFile(p, 'utf8');
+  } catch {
+    if (isR2Configured()) {
+      try {
+        const key = `projects/${projectId}/videos/${videoId}/workflow-cache/${folderName}/${METADATA_FILE}`;
+        const buf = await getObjectFromR2(key);
+        raw = buf.toString('utf8');
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  if (!raw) return null;
+
+  try {
     const data = JSON.parse(raw) as Record<string, unknown>;
     const result: { executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string } = {};
     if (typeof data.executionTimeMs === 'number' && data.executionTimeMs > 0) result.executionTimeMs = data.executionTimeMs;
@@ -149,13 +166,17 @@ export async function listWorkflowModuleCache(
   projectId: string,
   videoId: string
 ): Promise<{ folderName: string; moduleId: string }[]> {
+  const result: { folderName: string; moduleId: string }[] = [];
+  const seenFolders = new Set<string>();
+
+  // 1. Try local FS
   const cacheBase = getWorkflowCacheBase();
   const videoDir = path.join(cacheBase, projectId, videoId);
   try {
     const entries = await fs.readdir(videoDir, { withFileTypes: true });
-    const result: { folderName: string; moduleId: string }[] = [];
     for (const e of entries) {
       if (!e.isDirectory()) continue;
+      seenFolders.add(e.name);
       const metaPath = path.join(videoDir, e.name, MODULE_ID_FILE);
       try {
         const moduleId = (await fs.readFile(metaPath, 'utf8')).trim();
@@ -164,11 +185,52 @@ export async function listWorkflowModuleCache(
         result.push({ folderName: e.name, moduleId: e.name });
       }
     }
-    return result;
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
-    throw err;
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
+
+  // 2. Try R2
+  if (isR2Configured()) {
+    try {
+      const prefix = `projects/${projectId}/videos/${videoId}/workflow-cache/`;
+      const keys = await listObjectsFromR2(prefix);
+      
+      const r2Folders = new Set<string>();
+      const hasModuleIdFile = new Set<string>();
+      
+      for (const key of keys) {
+        const relativeKey = key.slice(prefix.length); // e.g. "folderName/file.txt"
+        const parts = relativeKey.split('/');
+        if (parts.length > 0 && parts[0]) {
+          const folderName = parts[0];
+          r2Folders.add(folderName);
+          if (parts[1] === MODULE_ID_FILE) {
+            hasModuleIdFile.add(folderName);
+          }
+        }
+      }
+
+      for (const folderName of r2Folders) {
+        if (!seenFolders.has(folderName)) {
+          seenFolders.add(folderName);
+          let moduleId = folderName;
+          if (hasModuleIdFile.has(folderName)) {
+            try {
+              const buf = await getObjectFromR2(`${prefix}${folderName}/${MODULE_ID_FILE}`);
+              moduleId = buf.toString('utf8').trim();
+            } catch {
+              // fallback to folderName
+            }
+          }
+          result.push({ folderName, moduleId });
+        }
+      }
+    } catch (err) {
+      console.error('[Runner] R2 list cache failed:', err);
+    }
+  }
+
+  return result;
 }
 
 /** List contents of a workflow cache folder. subPath is optional (e.g. "subdir" or "a/b"). */
@@ -177,36 +239,91 @@ export async function listWorkflowCacheFolderContents(
   videoId: string,
   folderName: string,
   subPath?: string
-): Promise<{ name: string; type: 'file' | 'dir'; size?: number; lastModified?: string }[]> {
+): Promise<{ name: string; type: 'file' | 'dir'; size?: number; lastModified?: string; r2Url?: string }[]> {
   if (folderName.includes('/') || folderName.includes('..') || folderName.startsWith('.')) {
     throw new Error('Invalid folder name');
   }
   if (subPath?.includes('..') || subPath?.startsWith('/')) {
     throw new Error('Invalid path');
   }
+
+  const resultMap = new Map<string, { name: string; type: 'file' | 'dir'; size?: number; lastModified?: string; r2Url?: string }>();
+
+  // 1. Try Local
   const cacheBase = getWorkflowCacheBase();
   const dir = subPath
     ? path.join(cacheBase, projectId, videoId, folderName, subPath)
     : path.join(cacheBase, projectId, videoId, folderName);
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  const result: { name: string; type: 'file' | 'dir'; size?: number; lastModified?: string }[] = [];
-  for (const e of entries) {
-    if (e.name.startsWith('.') && e.name !== '.module-id') continue;
-    const entry: { name: string; type: 'file' | 'dir'; size?: number; lastModified?: string } = {
-      name: e.name,
-      type: e.isDirectory() ? 'dir' : 'file',
-    };
-    if (e.isFile()) {
-      try {
-        const stat = await fs.stat(path.join(dir, e.name));
-        entry.size = stat.size;
-        entry.lastModified = stat.mtime.toISOString();
-      } catch {
-        /* ignore */
+  
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.name.startsWith('.') && e.name !== '.module-id') continue;
+      const entry: { name: string; type: 'file' | 'dir'; size?: number; lastModified?: string; r2Url?: string } = {
+        name: e.name,
+        type: e.isDirectory() ? 'dir' : 'file',
+      };
+      if (e.isFile()) {
+        try {
+          const stat = await fs.stat(path.join(dir, e.name));
+          entry.size = stat.size;
+          entry.lastModified = stat.mtime.toISOString();
+        } catch { /* ignore */ }
       }
+      resultMap.set(e.name, entry);
     }
-    result.push(entry);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
+
+  // 2. Try R2 and add presigned URLs for files
+  if (isR2Configured()) {
+    try {
+      let prefix = `projects/${projectId}/videos/${videoId}/workflow-cache/${folderName}/`;
+      if (subPath) prefix += `${subPath}/`;
+      
+      const objects = await listObjectsWithMetaFromR2(prefix);
+      for (const obj of objects) {
+        const relativeKey = obj.key.slice(prefix.length);
+        if (!relativeKey) continue;
+        const parts = relativeKey.split('/');
+        const name = parts[0];
+        if (name.startsWith('.') && name !== '.module-id') continue;
+        
+        if (parts.length === 1) {
+          // It's a file in this folder - add presigned URL
+          try {
+            const r2Url = await getPresignedUrl(obj.key, 3600);
+            const existing = resultMap.get(name);
+            if (existing) {
+              existing.r2Url = r2Url;
+              if (obj.size != null) existing.size = obj.size;
+              if (obj.lastModified) existing.lastModified = obj.lastModified.toISOString();
+            } else {
+              resultMap.set(name, {
+                name,
+                type: 'file',
+                size: obj.size,
+                lastModified: obj.lastModified?.toISOString(),
+                r2Url,
+              });
+            }
+          } catch {
+            /* skip presigned URL on error */
+          }
+        } else {
+          // It's a directory
+          if (!resultMap.has(name)) {
+            resultMap.set(name, { name, type: 'dir' });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Runner] R2 list folder contents failed:', err);
+    }
+  }
+
+  const result = Array.from(resultMap.values());
   result.sort((a, b) => {
     if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
     return a.name.localeCompare(b.name);
@@ -230,9 +347,26 @@ export async function readWorkflowModuleSlots(
   const folders = await listWorkflowModuleCache(projectId, videoId);
   const match = folders.find((f) => f.moduleId === moduleId);
   if (!match) return null;
+
+  let raw: string | null = null;
   try {
     const { absolutePath } = await getWorkflowCacheFilePath(projectId, videoId, match.folderName, 'slots.json');
-    const raw = await fs.readFile(absolutePath, 'utf8');
+    raw = await fs.readFile(absolutePath, 'utf8');
+  } catch {
+    if (isR2Configured()) {
+      try {
+        const key = `projects/${projectId}/videos/${videoId}/workflow-cache/${match.folderName}/slots.json`;
+        const buf = await getObjectFromR2(key);
+        raw = buf.toString('utf8');
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  if (!raw) return null;
+
+  try {
     const data = JSON.parse(raw) as { slots?: unknown[] };
     if (!Array.isArray(data.slots)) return null;
     const slots = data.slots
@@ -256,11 +390,27 @@ export async function getWorkflowCacheFolderR2Url(
   folderName: string
 ): Promise<string | null> {
   if (folderName.includes('/') || folderName.includes('..') || folderName.startsWith('.')) return null;
+
+  let key: string | null = null;
   const cacheBase = getWorkflowCacheBase();
   const keyPath = path.join(cacheBase, projectId, videoId, folderName, 'r2-uploaded-key.txt');
+  
   try {
-    const key = (await fs.readFile(keyPath, 'utf8')).trim();
-    if (!key) return null;
+    key = (await fs.readFile(keyPath, 'utf8')).trim();
+  } catch {
+    if (isR2Configured()) {
+      try {
+        const r2Key = `projects/${projectId}/videos/${videoId}/workflow-cache/${folderName}/r2-uploaded-key.txt`;
+        const buf = await getObjectFromR2(r2Key);
+        key = buf.toString('utf8').trim();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (!key) return null;
+  try {
     return await getPresignedUrl(key, 3600);
   } catch {
     return null;
@@ -273,20 +423,34 @@ export async function getWorkflowCacheFilePath(
   videoId: string,
   folderName: string,
   filePath: string
-): Promise<{ absolutePath: string; contentType: string }> {
+): Promise<{ absolutePath?: string; r2Key?: string; contentType: string }> {
   if (folderName.includes('/') || folderName.includes('..') || folderName.startsWith('.')) {
     throw new Error('Invalid folder name');
   }
   if (filePath.includes('..') || filePath.startsWith('/')) {
     throw new Error('Invalid path');
   }
-  const cacheBase = getWorkflowCacheBase();
-  const absolutePath = path.join(cacheBase, projectId, videoId, folderName, filePath);
+  
   const ext = path.extname(filePath).toLowerCase();
   const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
-  const stat = await fs.stat(absolutePath);
-  if (!stat.isFile()) throw new Error('Not a file');
-  return { absolutePath, contentType };
+
+  const cacheBase = getWorkflowCacheBase();
+  const absolutePath = path.join(cacheBase, projectId, videoId, folderName, filePath);
+  
+  try {
+    const stat = await fs.stat(absolutePath);
+    if (stat.isFile()) {
+      return { absolutePath, contentType };
+    }
+  } catch {
+    // Check R2
+    if (isR2Configured()) {
+      const r2Key = `projects/${projectId}/videos/${videoId}/workflow-cache/${folderName}/${filePath}`;
+      return { r2Key, contentType };
+    }
+  }
+
+  throw new Error('Not a file');
 }
 
 /** Remove cache directories for given module IDs. Safe to call with non-existent paths. */
@@ -297,6 +461,8 @@ export async function cleanupWorkflowModuleCache(
 ): Promise<void> {
   const cacheBase = getWorkflowCacheBase();
   const videoDir = path.join(cacheBase, projectId, videoId);
+  const deletedFolders = new Set<string>();
+
   try {
     const entries = await fs.readdir(videoDir, { withFileTypes: true });
     for (const e of entries) {
@@ -312,11 +478,80 @@ export async function cleanupWorkflowModuleCache(
       }
       if (matches) {
         await fs.rm(dirPath, { recursive: true });
+        deletedFolders.add(e.name);
       }
     }
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return;
-    throw err;
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+  }
+
+  // Also clean up from R2
+  if (isR2Configured()) {
+    try {
+      const prefix = `projects/${projectId}/videos/${videoId}/workflow-cache/`;
+      const keys = await listObjectsFromR2(prefix);
+      
+      const r2Folders = new Set<string>();
+      for (const key of keys) {
+        const relativeKey = key.slice(prefix.length);
+        const parts = relativeKey.split('/');
+        if (parts.length > 0 && parts[0]) r2Folders.add(parts[0]);
+      }
+
+      for (const folderName of r2Folders) {
+        if (deletedFolders.has(folderName)) {
+          // Already deleted from local and we know it matches, so delete from R2
+          await deletePrefixFromR2(`${prefix}${folderName}/`);
+          continue;
+        }
+
+        let matches = moduleIds.includes(folderName);
+        if (!matches) {
+          try {
+            const buf = await getObjectFromR2(`${prefix}${folderName}/${MODULE_ID_FILE}`);
+            const stored = buf.toString('utf8').trim();
+            matches = moduleIds.includes(stored);
+          } catch {
+            // ignore
+          }
+        }
+        if (matches) {
+          await deletePrefixFromR2(`${prefix}${folderName}/`);
+        }
+      }
+    } catch (err) {
+      console.error('[Runner] R2 cleanup failed:', err);
+    }
+  }
+}
+
+/** Upload the contents of a local module cache folder to R2. */
+async function syncModuleCacheToR2(projectId: string, videoId: string, moduleCacheDir: string, folderName: string): Promise<void> {
+  if (!isR2Configured()) return;
+  try {
+    const entries = await fs.readdir(moduleCacheDir, { withFileTypes: true, recursive: true });
+    const promises = [];
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const fullPath = path.join(e.path || moduleCacheDir, e.name);
+      let relPath = path.relative(moduleCacheDir, fullPath);
+      relPath = relPath.split(path.sep).join('/'); // normalize for S3
+      
+      promises.push((async () => {
+        try {
+          const buffer = await fs.readFile(fullPath);
+          const key = `projects/${projectId}/videos/${videoId}/workflow-cache/${folderName}/${relPath}`;
+          const ext = path.extname(e.name).toLowerCase();
+          const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+          await uploadToR2(key, buffer, contentType);
+        } catch (err) {
+          console.error(`[Runner] Failed to sync ${relPath} to R2:`, err);
+        }
+      })());
+    }
+    await Promise.all(promises);
+  } catch (err) {
+    console.error(`[Runner] Failed to sync module cache to R2:`, err);
   }
 }
 
@@ -353,8 +588,10 @@ export interface RunResult {
   error?: string;
   context?: WorkflowContext;
   stepResults?: { index: number; moduleId: string; success: boolean; error?: string }[];
-  /** When the last run step produced a text file (e.g. OpenRouter); worker uses this to set outputUrl to cache file URL */
-  lastStepOutput?: { kind: 'text'; path: string; cacheFolderName: string; relativePath: string };
+  /** When the last run step produced output; worker uses this to set outputUrl to workflow-cache file URL */
+  lastStepOutput?:
+    | { kind: 'text'; path: string; cacheFolderName: string; relativePath: string }
+    | { kind: 'video'; path: string; cacheFolderName: string; relativePath: string };
   /** Aggregated token usage from all paid-API modules (llm-agent, openrouter-vision, etc.) */
   totalTokenUsage?: TokenUsage;
   /** Estimated cost in USD based on OpenRouter pricing */
@@ -516,6 +753,15 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
       const outputVideoVar = def.outputs?.video;
       if (outputVideoVar && result.context.currentVideoPath) {
         variables[outputVideoVar] = result.context.currentVideoPath;
+        if (i === endIdx - 1) {
+          const cacheFolderName = path.basename(moduleCacheDir);
+          lastStepOutput = {
+            kind: 'video',
+            path: result.context.currentVideoPath,
+            cacheFolderName,
+            relativePath: path.basename(result.context.currentVideoPath),
+          };
+        }
       }
       const outputTextVar = def.outputs?.text;
       if (outputTextVar && result.context.currentTextOutputPath) {
@@ -542,6 +788,10 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
 
     totalExecutionTimeMs += executionTimeMs;
     await writeExecutionTimeToMetadata(moduleCacheDir, executionTimeMs);
+    
+    // Sync to R2 now that metadata is updated
+    syncModuleCacheToR2(projectId, videoId, moduleCacheDir, path.basename(moduleCacheDir)).catch(() => {});
+
     onLog?.(`[Step ${stepNum}] Execution time: ${(executionTimeMs / 1000).toFixed(1)}s`);
 
     const meta = await readModuleMetadata(moduleCacheDir);

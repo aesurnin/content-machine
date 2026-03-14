@@ -62,7 +62,17 @@ export const internalRoutes: FastifyPluginAsync = async (fastify) => {
     const ext = ct.includes('mp4') ? '.mp4' : '.webm';
     const key = `projects/${projectId}/${videoId}/recording${ext}`;
     await uploadToR2(key, body, ct.includes('mp4') ? 'video/mp4' : 'video/webm');
-    await db.update(videoEntities).set({ status: 'ready', sourceUrl: key, metadata: {} }).where(eq(videoEntities.id, videoId));
+
+    const originalReplayUrl = (request.headers['x-original-replay-url'] as string) || undefined;
+    const [existing] = await db.select().from(videoEntities).where(eq(videoEntities.id, videoId));
+    const prevMeta = (existing?.metadata as Record<string, unknown>) || {};
+    const replayUrl = originalReplayUrl ?? (typeof prevMeta.originalReplayUrl === 'string' ? prevMeta.originalReplayUrl : null)
+      ?? (existing?.sourceUrl?.startsWith('http') ? existing.sourceUrl : null);
+    const metadata = replayUrl ? { ...prevMeta, originalReplayUrl: replayUrl } : prevMeta;
+
+    await db.update(videoEntities)
+      .set({ status: 'ready', sourceUrl: key, metadata })
+      .where(eq(videoEntities.id, videoId));
     return reply.send({ ok: true, key });
   });
 };
